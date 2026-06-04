@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NAW — Operations Hub</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:      #F5F6FA;
+  --bg2:     #FFFFFF;
+  --bg3:     #F0F1F5;
+  --bg4:     #E8E9EF;
+  --border:  rgba(0,0,0,.08);
+  --border2: rgba(0,0,0,.14);
+  --primary:  #0D7E6A;
+  --primary2: #0A6657;
+  --accent:   #4F46E5;
+  --warn:     #D97706;
+  --danger:   #DC2626;
+  --success:  #059669;
+  --text:     #111827;
+  --text2:    #374151;
+  --text3:    #6B7280;
+  --text4:    #9CA3AF;
+  --mono:     'IBM Plex Mono', monospace;
+  --sans:     'DM Sans', system-ui, sans-serif;
+
+  /* Neumorphic shadows */
+  --neu-out: 6px 6px 14px rgba(0,0,0,.09), -4px -4px 10px rgba(255,255,255,.85);
+  --neu-in:  inset 3px 3px 7px rgba(0,0,0,.08), inset -3px -3px 7px rgba(255,255,255,.8);
+  --neu-card: 8px 8px 20px rgba(0,0,0,.1), -6px -6px 16px rgba(255,255,255,.9);
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: var(--sans); min-height: 100vh;
+  line-height: 1.5;
+}
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 2px; }
+
+/* ── TOPBAR ──────────────────────────────────────────── */
+.topbar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  height: 58px;
+  background: rgba(245,246,250,.85);
+  backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; padding: 0 32px; gap: 14px;
+}
+.topbar-logo {
+  display: flex; align-items: center; gap: 10px;
+}
+.logo-mark {
+  width: 34px; height: 34px; border-radius: 10px;
+  background: linear-gradient(135deg, var(--primary), var(--accent));
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--mono); font-weight: 700; font-size: 11px; color: #fff;
+  box-shadow: 0 4px 12px rgba(13,126,106,.3);
+}
+.logo-name { font-family: var(--mono); font-weight: 700; font-size: 14px; color: var(--text); }
+.logo-sub  { font-size: 9.5px; color: var(--text3); letter-spacing: .8px; text-transform: uppercase; margin-top: 1px; }
+.topbar-spacer { flex: 1; }
+.topbar-nav { display: flex; gap: 6px; }
+.topbar-nav a {
+  height: 32px; padding: 0 14px; border-radius: 8px;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600; color: var(--text3);
+  text-decoration: none; display: flex; align-items: center; gap: 6px;
+  transition: all .15s;
+}
+.topbar-nav a:hover { color: var(--text); background: var(--bg3); }
+.topbar-nav a.admin {
+  background: rgba(79,70,229,.08); color: var(--accent);
+  border: 1px solid rgba(79,70,229,.2);
+}
+.topbar-nav a.admin:hover { background: rgba(79,70,229,.16); }
+
+/* ── HERO ────────────────────────────────────────────── */
+.hero {
+  min-height: 100vh; display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  padding: 80px 32px 60px; text-align: center;
+  position: relative; overflow: hidden;
+}
+.hero-bg {
+  position: absolute; inset: 0; z-index: 0;
+  background:
+    radial-gradient(ellipse 70% 50% at 20% 40%, rgba(13,126,106,.07) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 50% at 80% 60%, rgba(79,70,229,.06) 0%, transparent 60%),
+    radial-gradient(ellipse 40% 40% at 50% 80%, rgba(217,119,6,.04) 0%, transparent 60%);
+}
+/* Subtle grid pattern */
+.hero-bg::after {
+  content: '';
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(rgba(0,0,0,.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,0,0,.03) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+.hero-content { position: relative; z-index: 1; max-width: 700px; }
+
+.hero-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--bg2); border: 1px solid var(--border2);
+  border-radius: 20px; padding: 5px 14px;
+  font-family: var(--mono); font-size: 10px; font-weight: 700;
+  color: var(--primary); letter-spacing: .5px; text-transform: uppercase;
+  box-shadow: var(--neu-out);
+  margin-bottom: 28px;
+  animation: fadeUp .6s ease both;
+}
+.hero-badge-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--primary);
+  animation: pulse 2s ease infinite;
+}
+@keyframes pulse {
+  0%,100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: .5; transform: scale(.8); }
+}
+
+.hero-title {
+  font-family: var(--mono); font-weight: 700; font-size: clamp(42px, 8vw, 72px);
+  color: var(--text); letter-spacing: -2px; line-height: 1.05;
+  animation: fadeUp .6s .1s ease both;
+}
+.hero-title span {
+  background: linear-gradient(135deg, var(--primary), var(--accent));
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.hero-sub {
+  font-size: 16px; color: var(--text3); margin-top: 18px; line-height: 1.6;
+  max-width: 500px; margin-left: auto; margin-right: auto;
+  animation: fadeUp .6s .2s ease both;
+}
+.hero-actions {
+  display: flex; gap: 12px; justify-content: center; margin-top: 36px;
+  flex-wrap: wrap;
+  animation: fadeUp .6s .3s ease both;
+}
+.hero-btn-primary {
+  height: 46px; padding: 0 28px;
+  background: linear-gradient(135deg, var(--primary), var(--primary2));
+  color: #fff; border-radius: 12px;
+  font-family: var(--mono); font-weight: 700; font-size: 12px;
+  text-decoration: none; display: flex; align-items: center; gap: 8px;
+  box-shadow: 0 6px 20px rgba(13,126,106,.3);
+  transition: all .2s;
+}
+.hero-btn-primary:hover { transform: translateY(-2px); box-shadow: 0 10px 28px rgba(13,126,106,.4); }
+.hero-btn-secondary {
+  height: 46px; padding: 0 24px;
+  background: var(--bg2); color: var(--text2); border-radius: 12px;
+  font-family: var(--mono); font-weight: 600; font-size: 12px;
+  text-decoration: none; display: flex; align-items: center; gap: 8px;
+  box-shadow: var(--neu-out); border: 1px solid var(--border);
+  transition: all .2s;
+}
+.hero-btn-secondary:hover { transform: translateY(-2px); box-shadow: var(--neu-card); }
+
+/* Scroll indicator */
+.scroll-hint {
+  position: absolute; bottom: 28px; left: 50%; transform: translateX(-50%);
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  font-family: var(--mono); font-size: 9px; color: var(--text4); letter-spacing: .5px;
+  animation: fadeIn 1s 1s ease both;
+}
+.scroll-arrow { animation: bounce 1.5s ease infinite; }
+@keyframes bounce { 0%,100% { transform: translateY(0); } 50% { transform: translateY(5px); } }
+
+/* ── APPS SECTION ────────────────────────────────────── */
+.apps-section {
+  padding: 80px 32px; max-width: 1100px; margin: 0 auto;
+}
+.section-label {
+  font-family: var(--mono); font-size: 10px; font-weight: 700;
+  color: var(--primary); text-transform: uppercase; letter-spacing: 1px;
+  margin-bottom: 10px;
+}
+.section-title {
+  font-family: var(--mono); font-weight: 700; font-size: 28px;
+  color: var(--text); letter-spacing: -1px; margin-bottom: 8px;
+}
+.section-sub {
+  font-size: 14px; color: var(--text3); margin-bottom: 48px;
+}
+
+.apps-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 20px;
+}
+
+.app-card {
+  background: var(--bg2); border-radius: 20px;
+  box-shadow: var(--neu-card); border: 1px solid var(--border);
+  padding: 28px; display: flex; flex-direction: column; gap: 18px;
+  text-decoration: none; color: inherit;
+  transition: all .25s; position: relative; overflow: hidden;
+}
+.app-card::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  background: var(--card-accent, var(--primary));
+  transform: scaleX(0); transform-origin: left;
+  transition: transform .3s ease;
+}
+.app-card:hover { transform: translateY(-4px); box-shadow: 12px 12px 30px rgba(0,0,0,.12), -8px -8px 20px rgba(255,255,255,.95); }
+.app-card:hover::before { transform: scaleX(1); }
+
+.app-card.inventory { --card-accent: var(--primary); }
+.app-card.po        { --card-accent: var(--accent); }
+.app-card.admin     { --card-accent: var(--warn); }
+.app-card.cwh       { --card-accent: #0891B2; }
+.app-card.finance   { --card-accent: #7C3AED; }
+.app-card.usage     { --card-accent: #059669; }
+
+.app-card-icon {
+  width: 52px; height: 52px; border-radius: 14px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 24px;
+  box-shadow: var(--neu-out);
+}
+.app-card.inventory .app-card-icon { background: rgba(13,126,106,.1); }
+.app-card.po        .app-card-icon { background: rgba(79,70,229,.1); }
+.app-card.admin     .app-card-icon { background: rgba(217,119,6,.1); }
+.app-card.cwh       .app-card-icon { background: rgba(8,145,178,.1); }
+.app-card.finance   .app-card-icon { background: rgba(124,58,237,.1); }
+.app-card.usage     .app-card-icon { background: rgba(5,150,105,.1); }
+
+.app-card-label {
+  font-family: var(--mono); font-size: 9.5px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .8px;
+}
+.app-card.inventory .app-card-label { color: var(--primary); }
+.app-card.po        .app-card-label { color: var(--accent); }
+.app-card.admin     .app-card-label { color: var(--warn); }
+.app-card.cwh       .app-card-label { color: #0891B2; }
+.app-card.finance   .app-card-label { color: #7C3AED; }
+.app-card.usage     .app-card-label { color: #059669; }
+
+.app-card-name {
+  font-family: var(--mono); font-weight: 700; font-size: 18px;
+  color: var(--text); letter-spacing: -.5px;
+}
+.app-card-desc {
+  font-size: 13px; color: var(--text3); line-height: 1.6; flex: 1;
+}
+.app-card-features {
+  display: flex; flex-direction: column; gap: 6px;
+}
+.app-feature {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--text2);
+}
+.app-feature-dot {
+  width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0;
+}
+.app-card.inventory .app-feature-dot { background: var(--primary); }
+.app-card.po        .app-feature-dot { background: var(--accent); }
+.app-card.admin     .app-feature-dot { background: var(--warn); }
+.app-card.cwh       .app-feature-dot { background: #0891B2; }
+.app-card.finance   .app-feature-dot { background: #7C3AED; }
+.app-card.usage     .app-feature-dot { background: #059669; }
+
+.app-card-cta {
+  display: flex; align-items: center; justify-content: space-between;
+  padding-top: 14px; border-top: 1px solid var(--border);
+}
+.app-card-cta-label {
+  font-family: var(--mono); font-size: 11px; font-weight: 700;
+}
+.app-card.inventory .app-card-cta-label { color: var(--primary); }
+.app-card.po        .app-card-cta-label { color: var(--accent); }
+.app-card.admin     .app-card-cta-label { color: var(--warn); }
+.app-card.cwh       .app-card-cta-label { color: #0891B2; }
+.app-card.finance   .app-card-cta-label { color: #7C3AED; }
+.app-card.usage     .app-card-cta-label { color: #059669; }
+
+.app-card-arrow {
+  width: 30px; height: 30px; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; transition: transform .2s;
+}
+.app-card.inventory .app-card-arrow { background: rgba(13,126,106,.1); color: var(--primary); }
+.app-card.po        .app-card-arrow { background: rgba(79,70,229,.1);  color: var(--accent); }
+.app-card.admin     .app-card-arrow { background: rgba(217,119,6,.1);  color: var(--warn); }
+.app-card.cwh       .app-card-arrow { background: rgba(8,145,178,.1);   color: #0891B2; }
+.app-card.finance   .app-card-arrow { background: rgba(124,58,237,.1);  color: #7C3AED; }
+.app-card.usage     .app-card-arrow { background: rgba(5,150,105,.1);   color: #059669; }
+.app-card:hover .app-card-arrow { transform: translateX(4px); }
+
+/* ── STATS STRIP ─────────────────────────────────────── */
+.stats-strip {
+  background: var(--bg2); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  padding: 32px; display: flex; justify-content: center; gap: 0;
+}
+.stat-item {
+  flex: 1; max-width: 200px; text-align: center;
+  padding: 0 24px; border-right: 1px solid var(--border);
+}
+.stat-item:last-child { border-right: none; }
+.stat-val { font-family: var(--mono); font-weight: 700; font-size: 32px; color: var(--text); }
+.stat-val.green { color: var(--primary); }
+.stat-val.purple { color: var(--accent); }
+.stat-lbl { font-size: 11.5px; color: var(--text3); margin-top: 4px; }
+
+/* ── FLOW SECTION ────────────────────────────────────── */
+.flow-section {
+  padding: 80px 32px; max-width: 1100px; margin: 0 auto;
+}
+.flow-steps {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0; margin-top: 40px; position: relative;
+}
+.flow-steps::before {
+  content: ''; position: absolute; top: 32px; left: 10%; right: 10%; height: 2px;
+  background: linear-gradient(90deg, var(--primary), var(--accent));
+  opacity: .2;
+}
+.flow-step {
+  display: flex; flex-direction: column; align-items: center;
+  text-align: center; padding: 0 16px; gap: 12px; position: relative;
+}
+.flow-num {
+  width: 56px; height: 56px; border-radius: 50%;
+  background: var(--bg2); border: 2px solid var(--border2);
+  box-shadow: var(--neu-out);
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--mono); font-weight: 700; font-size: 16px; color: var(--text3);
+  position: relative; z-index: 1;
+}
+.flow-step.active .flow-num {
+  background: linear-gradient(135deg, var(--primary), var(--accent));
+  color: #fff; border-color: transparent;
+  box-shadow: 0 6px 18px rgba(13,126,106,.3);
+}
+.flow-title { font-family: var(--mono); font-weight: 700; font-size: 12px; color: var(--text); }
+.flow-desc  { font-size: 11.5px; color: var(--text3); line-height: 1.5; }
+
+/* ── FOOTER ──────────────────────────────────────────── */
+.footer {
+  background: var(--bg2); border-top: 1px solid var(--border);
+  padding: 28px 32px;
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 12px;
+}
+.footer-brand { display: flex; align-items: center; gap: 10px; }
+.footer-logo-mark {
+  width: 28px; height: 28px; border-radius: 7px;
+  background: linear-gradient(135deg, var(--primary), var(--accent));
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--mono); font-weight: 700; font-size: 9px; color: #fff;
+}
+.footer-name { font-family: var(--mono); font-weight: 700; font-size: 12px; }
+.footer-sub  { font-size: 10.5px; color: var(--text3); }
+.footer-links { display: flex; gap: 16px; }
+.footer-links a {
+  font-family: var(--mono); font-size: 10px; color: var(--text3);
+  text-decoration: none; transition: color .15s;
+}
+.footer-links a:hover { color: var(--primary); }
+.footer-copy { font-size: 10.5px; color: var(--text4); }
+
+/* ── ANIMATIONS ──────────────────────────────────────── */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.reveal {
+  opacity: 0; transform: translateY(24px);
+  transition: opacity .6s ease, transform .6s ease;
+}
+.reveal.visible { opacity: 1; transform: translateY(0); }
+
+/* Stagger children */
+.apps-grid .app-card:nth-child(1) { transition-delay: .05s; }
+.apps-grid .app-card:nth-child(2) { transition-delay: .15s; }
+.apps-grid .app-card:nth-child(3) { transition-delay: .25s; }
+.flow-step:nth-child(1) { transition-delay: .0s; }
+.flow-step:nth-child(2) { transition-delay: .1s; }
+.flow-step:nth-child(3) { transition-delay: .2s; }
+.flow-step:nth-child(4) { transition-delay: .3s; }
+.flow-step:nth-child(5) { transition-delay: .4s; }
+
+@media (max-width: 600px) {
+  .topbar-nav { display: none; }
+  .hero-title { font-size: 38px; }
+  .stats-strip { flex-wrap: wrap; }
+  .stat-item { border-right: none; border-bottom: 1px solid var(--border); padding: 16px; }
+  .flow-steps::before { display: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- ══ TOPBAR ═══════════════════════════════════════════ -->
+<div class="topbar">
+  <div class="topbar-logo">
+    <div class="logo-mark">NAW</div>
+    <div>
+      <div class="logo-name">NAW</div>
+      <div class="logo-sub">Operations Hub</div>
+    </div>
+  </div>
+  <div class="topbar-spacer"></div>
+  <nav class="topbar-nav">
+    <a href="naw-inventory.html">📦 Inventory</a>
+    <a href="naw-po.html">🛒 Purchase Orders</a>
+    <a href="naw-cwh.html">🏭 CWH</a>
+    <a href="naw-finance.html">🏦 Finance</a>
+    <a href="naw-usage.html">📊 Usage</a>
+    <a href="naw-admin.html" class="admin">⚙ Admin</a>
+  </nav>
+</div>
+
+<!-- ══ HERO ═════════════════════════════════════════════ -->
+<section class="hero">
+  <div class="hero-bg"></div>
+  <div class="hero-content">
+    <div class="hero-badge">
+      <div class="hero-badge-dot"></div>
+      Operations Management System
+    </div>
+    <h1 class="hero-title">
+      Everything your<br><span>operations need</span>
+    </h1>
+    <p class="hero-sub">
+      Inventory tracking, purchase orders, vendor management,
+      and finance reporting — all in one place for your branches.
+    </p>
+    <div class="hero-actions">
+      <a href="naw-po.html" class="hero-btn-primary">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 2L3 6v14a2 2 0 002 2h14a2 2 0 002-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 01-8 0"/></svg>
+        Open Purchase Orders
+      </a>
+      <a href="naw-inventory.html" class="hero-btn-secondary">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+        View Inventory
+      </a>
+    </div>
+  </div>
+  <div class="scroll-hint">
+    <span>SCROLL</span>
+    <div class="scroll-arrow">↓</div>
+  </div>
+</section>
+
+<!-- ══ STATS ════════════════════════════════════════════ -->
+<div class="stats-strip">
+  <div class="stat-item">
+    <div class="stat-val green">6</div>
+    <div class="stat-lbl">Integrated Apps</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-val">CWH</div>
+    <div class="stat-lbl">Central Warehouse</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-val purple">PO</div>
+    <div class="stat-lbl">Purchase Orders</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-val">∞</div>
+    <div class="stat-lbl">Branches Supported</div>
+  </div>
+</div>
+
+<!-- ══ APPS ════════════════════════════════════════════ -->
+<section class="apps-section">
+  <div class="section-label">Applications</div>
+  <div class="section-title">Six apps. One system.</div>
+  <p class="section-sub">Each app handles a specific part of your operation — sign in once, access everything.</p>
+
+  <div class="apps-grid">
+
+    <!-- Inventory -->
+    <a href="naw-inventory.html" class="app-card inventory reveal">
+      <div class="app-card-icon">📦</div>
+      <div>
+        <div class="app-card-label">Inventory</div>
+        <div class="app-card-name">Stock Tracker</div>
+      </div>
+      <p class="app-card-desc">
+        Track food & beverage inventory across all categories and vendors.
+        Monitor IN/OUT movements with a full audit trail.
+      </p>
+      <div class="app-card-features">
+        <div class="app-feature"><div class="app-feature-dot"></div>Multi-category inventory</div>
+        <div class="app-feature"><div class="app-feature-dot"></div>Vendor order sheets</div>
+        <div class="app-feature"><div class="app-feature-dot"></div>Week-by-week tracking</div>
+        <div class="app-feature"><div class="app-feature-dot"></div>Export to Excel</div>
+      </div>
+      <div class="app-card-cta">
+        <span class="app-card-cta-label">Open Inventory →</span>
+        <div class="app-card-arrow">→</div>
+      </div>
+    </a>
+
+    <!-- Purchase Orders -->
+    <a href="naw-po.html" class="app-card po reveal">
+      <div class="app-card-icon">🛒</div>
+      <div>
+        <div class="app-card-label">Purchase Orders</div>
+        <div class="app-card-name">PO System</div>
+      </div>
+      <p class="app-card-desc">
+        Browse the market, build your basket, and send purchase orders
+        to CWH or directly to vendors — with email PDF dispatch.
+      </p>
+      <div class="app-card-features">
+        <div class="app-feature"><div class="app-feature-dot"></div>Market browsing with filters</div>
+        <div class="app-feature"><div class="app-feature-dot"></div>CWH + vendor order split</div>
+        <div class="app-feature"><div class="app-feature-dot"></div>Receive & adjust items</div>
+        <div class="app-feature"><div class="app-feature-dot"></div>Finance submission</div>
+      </div>
+      <div class="app-card-cta">
+        <span class="app-card-cta-label">Open PO System →</span>
+        <div class="app-card-arrow">→</div>
+      </div>
+    </a>
+
+    <!-- Admin -->
+    <a href="naw-admin.html" class="app-card admin reveal">
+      <div class="app-card-icon">⚙️</div>
+      <div>
+        <div class="app-card-label">Admin Panel</div>
+        <div class="app-card-name">Control Center</div>
+      </div>
+      <p class="app-card-desc">
+        Manage companies, branches, and user subscriptions.
+        Control who has access and monitor all purchase orders.
+      </p>
+      <div class="app-card-features">
+        <div class="app-feature"><div class="app-feature-dot"></div>Company & branch hierarchy</div>
+        <div class="app-feature"><div class="app-feature-dot"></div>User subscription control</div>
+        <div class="app-feature"><div class="app-feature-dot"></div>Logo management</div>
+        <div class="app-feature"><div class="app-feature-dot"></div>PO overview dashboard</div>
+      </div>
+      <div class="app-card-cta">
+        <span class="app-card-cta-label">Admin Only →</span>
+        <div class="app-card-arrow">→</div>
+      </div>
+    </a>
+
+    <!-- CWH -->
+    <a href="naw-cwh.html" class="app-card cwh reveal">
+      <div class="app-card-icon">🏭</div>
+      <div>
+        <div class="app-card-label">Warehouse</div>
+        <div class="app-card-name">CWH Portal</div>
+      </div>
+      <p class="app-card-desc">
+        Central Warehouse manages stock levels, receives branch orders,
+        and confirms item availability — item by item.
+      </p>
+      <div class="app-card-features">
+        <div class="app-feature"><div class="app-feature-dot"></div>Real-time branch order feed</div>
+        <div class="app-feature"><div class="app-feature-dot"></div>Full / Partial / None per item</div>
+        <div class="app-feature"><div class="app-feature-dot"></div>Stock auto-deducted on fulfill</div>
+        <div class="app-feature"><div class="app-feature-dot"></div>Fulfillment history</div>
+      </div>
+      <div class="app-card-cta">
+        <span class="app-card-cta-label">Open CWH →</span>
+        <div class="app-card-arrow">→</div>
+      </div>
+    </a>
+
+    <!-- Finance -->
+    <a href="naw-finance.html" class="app-card finance reveal">
+      <div class="app-card-icon">🏦</div>
+      <div>
+        <div class="app-card-label">Finance</div>
+        <div class="app-card-name">Finance Portal</div>
+      </div>
+      <p class="app-card-desc">
+        Full financial dashboard — all POs organized by company and branch,
+        with ordered vs received variance reporting.
+      </p>
+      <div class="app-card-features">
+        <div class="app-feature"><div class="app-feature-dot"></div>Company & branch breakdown</div>
+        <div class="app-feature"><div class="app-feature-dot"></div>Ordered vs received variance</div>
+        <div class="app-feature"><div class="app-feature-dot"></div>Printable branch reports</div>
+        <div class="app-feature"><div class="app-feature-dot"></div>Full records with filters</div>
+      </div>
+      <div class="app-card-cta">
+        <span class="app-card-cta-label">Open Finance →</span>
+        <div class="app-card-arrow">→</div>
+      </div>
+    </a>
+
+    <!-- Usage -->
+    <a href="naw-usage.html" class="app-card usage reveal">
+      <div class="app-card-icon">📊</div>
+      <div>
+        <div class="app-card-label">Mobile</div>
+        <div class="app-card-name">Usage Entry</div>
+      </div>
+      <p class="app-card-desc">
+        Mobile-optimized app for floor staff to log item usage —
+        auto-syncs and deducts from branch inventory in real time.
+      </p>
+      <div class="app-card-features">
+        <div class="app-feature"><div class="app-feature-dot"></div>Search + browse by category</div>
+        <div class="app-feature"><div class="app-feature-dot"></div>Cart with qty adjustment</div>
+        <div class="app-feature"><div class="app-feature-dot"></div>Auto-deducts branch inventory</div>
+        <div class="app-feature"><div class="app-feature-dot"></div>Usage history log</div>
+      </div>
+      <div class="app-card-cta">
+        <span class="app-card-cta-label">Open Usage App →</span>
+        <div class="app-card-arrow">→</div>
+      </div>
+    </a>
+
+  </div>
+</section>
+
+<!-- ══ FLOW ══════════════════════════════════════════════ -->
+<section class="flow-section">
+  <div class="section-label">How It Works</div>
+  <div class="section-title">The order flow</div>
+  <p class="section-sub">From browsing to finance — every step tracked.</p>
+
+  <div class="flow-steps">
+    <div class="flow-step reveal active">
+      <div class="flow-num">1</div>
+      <div class="flow-title">Browse Market</div>
+      <div class="flow-desc">Branch browses inventory, filters by vendor or storage category</div>
+    </div>
+    <div class="flow-step reveal">
+      <div class="flow-num">2</div>
+      <div class="flow-title">Build Basket</div>
+      <div class="flow-desc">Add items to basket, set quantities, review split by CWH / Vendor</div>
+    </div>
+    <div class="flow-step reveal active">
+      <div class="flow-num">3</div>
+      <div class="flow-title">Send Orders</div>
+      <div class="flow-desc">CWH orders go to system. Vendor orders open Outlook with PDF email</div>
+    </div>
+    <div class="flow-step reveal">
+      <div class="flow-num">4</div>
+      <div class="flow-title">Receive Items</div>
+      <div class="flow-desc">Mark each item received, not received, or adjust quantity</div>
+    </div>
+    <div class="flow-step reveal active">
+      <div class="flow-num">5</div>
+      <div class="flow-title">Finance</div>
+      <div class="flow-desc">Submit to Finance dashboard with full audit of ordered vs received</div>
+    </div>
+  </div>
+</section>
+
+<!-- ══ FOOTER ═══════════════════════════════════════════ -->
+<footer class="footer">
+  <div class="footer-brand">
+    <div class="footer-logo-mark">NAW</div>
+    <div>
+      <div class="footer-name">NAW Operations Hub</div>
+      <div class="footer-sub">Internal Operations System</div>
+    </div>
+  </div>
+  <div class="footer-links">
+    <a href="naw-inventory.html">Inventory</a>
+    <a href="naw-po.html">Purchase Orders</a>
+    <a href="naw-cwh.html">CWH</a>
+    <a href="naw-finance.html">Finance</a>
+    <a href="naw-usage.html">Usage</a>
+    <a href="naw-admin.html">Admin</a>
+  </div>
+  <div class="footer-copy">Powered by Firebase · GitHub Pages</div>
+</footer>
+
+<script>
+  // Scroll reveal
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('visible'); });
+  }, { threshold: 0.1 });
+  document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+</script>
+
+</body>
+</html>

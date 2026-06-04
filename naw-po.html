@@ -1,0 +1,1358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NAW — Purchase Orders</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+<!-- ══ FIREBASE ══════════════════════════════════════════ -->
+<script type="module">
+  import { initializeApp }   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged }
+    from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+  import {
+    getFirestore, doc, getDoc, setDoc, updateDoc, addDoc,
+    collection, query, where, getDocs, serverTimestamp, orderBy
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  /* ── PASTE YOUR FIREBASE CONFIG HERE ─────────────────── */
+  const firebaseConfig = {
+    apiKey:            "AIzaSyDO0S2QZXmoQ96Dq3o_Gri9mSrkyUW5UCM",
+    authDomain:        "opshub-erp.firebaseapp.com",
+    projectId:         "opshub-erp",
+    storageBucket:     "opshub-erp.firebasestorage.app",
+    messagingSenderId: "379300236732",
+    appId:             "1:379300236732:web:0ca625d707b736536b2fb9",
+    measurementId:     "G-FMKTEY0L5R"
+  };
+  /* ────────────────────────────────────────────────────── */
+
+  const app  = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db   = getFirestore(app);
+
+  /* ── App state ──────────────────────────────────────── */
+  let currentUser = null, userProfile = null;
+  let basket = {};          // { code: { item, qty, unit, price, vendor, category, storage } }
+  let currentView = 'market'; // market | basket | orders | finance
+  let allItems = [];        // from Firestore inventory or static data
+  let filterVendor = '', filterStorage = '', filterSearch = '';
+  let orders = [];
+
+  /* ═══════════════════════════════════════════════════════
+     AUTH
+  ═══════════════════════════════════════════════════════ */
+  const showScreen = id => {
+    document.querySelectorAll('.screen').forEach(s => s.style.display = 'none');
+    document.getElementById(id).style.display = 'flex';
+  };
+
+  onAuthStateChanged(auth, async user => {
+    if (!user) { showScreen('login-screen'); return; }
+    try {
+      let sub = null;
+      const snapUID = await getDoc(doc(db, 'subscriptions', user.uid));
+      if (snapUID.exists() && snapUID.data().active) sub = snapUID.data();
+      if (!sub) {
+        const safeEmail = user.email.replace(/\./g, '_');
+        const snapEmail = await getDoc(doc(db, 'subscriptions_by_email', safeEmail));
+        if (snapEmail.exists() && snapEmail.data().active) sub = snapEmail.data();
+      }
+      if (!sub) { showNoAccess(user); return; }
+      currentUser = user;
+      userProfile = sub;
+      document.getElementById('topbar-user').textContent = user.email;
+      document.getElementById('topbar-branch').textContent =
+        (sub.companyName || '') + (sub.branchName ? ' · ' + sub.branchName : '');
+      // Load logos from Firestore
+      if (sub.companyId) {
+        try {
+          const compSnap = await getDoc(doc(db, 'companies', sub.companyId));
+          if (compSnap.exists()) {
+            const cd = compSnap.data();
+            userProfile.companyLogoUrl = cd.logoUrl || '';
+            if (sub.branchId) {
+              const brSnap = await getDoc(doc(db, 'companies', sub.companyId, 'branches', sub.branchId));
+              if (brSnap.exists()) userProfile.branchLogoUrl = brSnap.data().logoUrl || '';
+            }
+          }
+        } catch(e) {}
+        // Render logos in topbar
+        const lb = document.getElementById('topbar-logos');
+        if (lb) {
+          lb.innerHTML = [userProfile.branchLogoUrl, userProfile.companyLogoUrl]
+            .filter(Boolean)
+            .map(u => `<img src="${u}" class="tb-logo-img" alt="logo" onerror="this.remove()">`)
+            .join('');
+        }
+      }
+      showScreen('app-screen');
+      await loadInventory();
+      loadBasket();
+      renderMarket();
+      await loadOrders();
+    } catch (e) { showNoAccess(user, e.message); }
+  });
+
+  window.__nawLogin = async () => {
+    const email = document.getElementById('auth-email').value.trim();
+    const pass  = document.getElementById('auth-pass').value;
+    if (!email || !pass) { setAuthErr('Enter email and password.'); return; }
+    setAuthErr('');
+    const btn = document.getElementById('login-btn');
+    btn.disabled = true; btn.textContent = 'Signing in…';
+    try { await signInWithEmailAndPassword(auth, email, pass); }
+    catch(e) {
+      const m = {'auth/wrong-password':'Wrong password.','auth/user-not-found':'No account found.',
+        'auth/invalid-credential':'Invalid email or password.'};
+      setAuthErr(m[e.code]||'Sign-in failed.');
+      btn.disabled = false; btn.textContent = 'Sign In';
+    }
+  };
+  window.__nawLogout = () => signOut(auth);
+  window.__nawPassKey = e => { if(e.key==='Enter') window.__nawLogin(); };
+  function setAuthErr(m) {
+    const el = document.getElementById('auth-err');
+    el.textContent = m; el.style.display = m ? 'block' : 'none';
+  }
+  function showNoAccess(user, msg) {
+    showScreen('no-access-screen');
+    document.getElementById('na-email').textContent = user.email;
+    document.getElementById('na-msg').textContent   = msg || '';
+  }
+
+  /* ═══════════════════════════════════════════════════════
+     INVENTORY LOAD
+  ═══════════════════════════════════════════════════════ */
+  async function loadInventory() {
+    // Try to load from Firestore; fall back to embedded static data
+    try {
+      const snap = await getDocs(collection(db, 'inventory_items'));
+      if (!snap.empty) {
+        allItems = []; snap.forEach(d => allItems.push({...d.data(), id: d.id}));
+        return;
+      }
+    } catch(e) {}
+    // Fall back to the static INVENTORY array from naw-inventory.html (embedded subset here)
+    allItems = window.NAW_INVENTORY || [];
+  }
+
+  /* ═══════════════════════════════════════════════════════
+     BASKET
+  ═══════════════════════════════════════════════════════ */
+  function loadBasket() {
+    try { basket = JSON.parse(sessionStorage.getItem('naw_basket') || '{}'); } catch(e) { basket = {}; }
+    updateBasketBadge();
+  }
+  function saveBasket() { sessionStorage.setItem('naw_basket', JSON.stringify(basket)); }
+
+  window.addToBasket = (code) => {
+    const item = allItems.find(i => i.code === code);
+    if (!item) return;
+    if (basket[code]) { basket[code].qty += 1; }
+    else basket[code] = { ...item, qty: 1 };
+    saveBasket(); updateBasketBadge();
+    toast(`✓ ${item.item.slice(0,30)} added`, 'ok');
+    // update qty badge on card
+    const badge = document.getElementById('qty-badge-' + code.replace(/[^a-zA-Z0-9]/g,'_'));
+    if (badge) { badge.textContent = basket[code].qty; badge.style.display = 'inline-flex'; }
+  };
+
+  window.removeFromBasket = (code) => {
+    delete basket[code];
+    saveBasket(); updateBasketBadge();
+    if (currentView === 'basket') renderBasket();
+  };
+
+  window.setBasketQty = (code, val) => {
+    const qty = parseFloat(val) || 0;
+    if (qty <= 0) { delete basket[code]; }
+    else if (basket[code]) { basket[code].qty = qty; }
+    saveBasket(); updateBasketBadge();
+    if (currentView === 'basket') updateBasketTotals();
+  };
+
+  function updateBasketBadge() {
+    const count = Object.keys(basket).length;
+    const badge = document.getElementById('basket-badge');
+    if (badge) { badge.textContent = count; badge.style.display = count ? 'inline-flex' : 'none'; }
+  }
+
+  /* ═══════════════════════════════════════════════════════
+     NAVIGATION
+  ═══════════════════════════════════════════════════════ */
+  window.switchView = (view) => {
+    currentView = view;
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+    const btn = document.getElementById('nav-' + view);
+    if (btn) btn.classList.add('active');
+    document.querySelectorAll('.view').forEach(v => v.style.display = 'none');
+    document.getElementById('view-' + view).style.display = 'flex';
+    if (view === 'market')  renderMarket();
+    if (view === 'basket')  renderBasket();
+    if (view === 'orders')  renderOrders();
+    if (view === 'finance') renderFinance();
+  };
+
+  /* ═══════════════════════════════════════════════════════
+     MARKET VIEW
+  ═══════════════════════════════════════════════════════ */
+  function getVendors() {
+    const vs = new Set(allItems.map(i=>i.vendor).filter(Boolean));
+    return [...vs].sort();
+  }
+  function getStorages() {
+    const ss = new Set(allItems.map(i=>i.category).filter(Boolean));
+    return [...ss].sort();
+  }
+
+  function renderMarket() {
+    // Build filter selects
+    const vSel = document.getElementById('mkt-vendor-sel');
+    const sSel = document.getElementById('mkt-storage-sel');
+    if (vSel && vSel.options.length <= 1) {
+      getVendors().forEach(v => {
+        const o = document.createElement('option'); o.value = v; o.textContent = v; vSel.appendChild(o);
+      });
+    }
+    if (sSel && sSel.options.length <= 1) {
+      getStorages().forEach(s => {
+        const o = document.createElement('option'); o.value = s; o.textContent = s; sSel.appendChild(o);
+      });
+    }
+
+    const search = filterSearch.toLowerCase();
+    const filtered = allItems.filter(i => {
+      if (filterVendor  && i.vendor   !== filterVendor)  return false;
+      if (filterStorage && i.category !== filterStorage) return false;
+      if (search && !i.item.toLowerCase().includes(search) && !i.code.toLowerCase().includes(search)) return false;
+      return true;
+    });
+
+    const grid = document.getElementById('market-grid');
+    if (!grid) return;
+    if (!filtered.length) { grid.innerHTML = '<div class="empty-mkt">No items match your filters.</div>'; return; }
+
+    grid.innerHTML = filtered.map(item => {
+      const safeId = item.code.replace(/[^a-zA-Z0-9]/g,'_');
+      const inBasket = basket[item.code];
+      return `
+      <div class="mkt-card ${inBasket ? 'in-basket' : ''}">
+        <div class="mkt-card-top">
+          <div class="mkt-code">${item.code}</div>
+          ${inBasket ? `<span class="mkt-qty-badge" id="qty-badge-${safeId}">${inBasket.qty}</span>` : `<span class="mkt-qty-badge" id="qty-badge-${safeId}" style="display:none">0</span>`}
+        </div>
+        <div class="mkt-item-name">${item.item}</div>
+        <div class="mkt-meta">
+          <span class="mkt-cat">${item.category || '—'}</span>
+          ${item.vendor ? `<span class="mkt-vendor">🏭 ${item.vendor}</span>` : ''}
+        </div>
+        <div class="mkt-bottom">
+          <div class="mkt-price">${item.price ? 'SAR ' + Number(item.price).toFixed(2) : '—'} <span class="mkt-unit">/ ${item.unit||'EA'}</span></div>
+          <button class="mkt-add-btn" onclick="addToBasket('${item.code.replace(/'/g,"\\'")}')">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Add
+          </button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  window.mktFilter = () => {
+    filterVendor  = document.getElementById('mkt-vendor-sel').value;
+    filterStorage = document.getElementById('mkt-storage-sel').value;
+    filterSearch  = document.getElementById('mkt-search').value;
+    renderMarket();
+  };
+
+  /* ═══════════════════════════════════════════════════════
+     BASKET VIEW
+  ═══════════════════════════════════════════════════════ */
+  function renderBasket() {
+    const tbody = document.getElementById('basket-tbody');
+    const items = Object.values(basket);
+    if (!items.length) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:40px;color:var(--text3);font-family:var(--mono);font-size:11px;">Basket is empty. Browse the Market to add items.</td></tr>';
+      document.getElementById('basket-footer').style.display = 'none';
+      return;
+    }
+    document.getElementById('basket-footer').style.display = 'flex';
+
+    // Group by type: CWH vs Vendor
+    const cwhItems    = items.filter(i => !i.vendor || i.vendor === '' || i.vendor === 'CWH' || i.vendor === 'CENTRAL WAREHOUSE');
+    const vendorItems = items.filter(i => i.vendor  && i.vendor !== '' && i.vendor !== 'CWH' && i.vendor !== 'CENTRAL WAREHOUSE');
+
+    const renderRow = (i) => `
+      <tr class="basket-row">
+        <td><span class="b-code">${i.code}</span></td>
+        <td>
+          <div class="b-name">${i.item}</div>
+          <div class="b-meta">${i.category || ''} ${i.vendor ? '· ' + i.vendor : ''}</div>
+        </td>
+        <td><span class="b-unit">${i.unit||'EA'}</span></td>
+        <td><span class="b-price">${i.price ? 'SAR '+Number(i.price).toFixed(2) : '—'}</span></td>
+        <td>
+          <input class="b-qty-input" type="number" min="0.001" step="any" value="${i.qty}"
+            onchange="setBasketQty('${i.code.replace(/'/g,"\\'")}', this.value)">
+        </td>
+        <td>
+          <span class="b-total">${i.price ? 'SAR '+(i.price*i.qty).toFixed(2) : '—'}</span>
+          <button class="b-del-btn" onclick="removeFromBasket('${i.code.replace(/'/g,"\\'")}')">✕</button>
+        </td>
+      </tr>`;
+
+    let html = '';
+    if (cwhItems.length) {
+      html += `<tr class="basket-group-hdr"><td colspan="6">📦 CWH — Central Warehouse Orders (${cwhItems.length} items)</td></tr>`;
+      html += cwhItems.map(renderRow).join('');
+    }
+    if (vendorItems.length) {
+      // Group vendor items by vendor
+      const byVendor = {};
+      vendorItems.forEach(i => { if(!byVendor[i.vendor]) byVendor[i.vendor] = []; byVendor[i.vendor].push(i); });
+      Object.entries(byVendor).forEach(([vendor, vitems]) => {
+        html += `<tr class="basket-group-hdr vendor-group"><td colspan="6">🏭 Vendor: ${vendor} (${vitems.length} items)</td></tr>`;
+        html += vitems.map(renderRow).join('');
+      });
+    }
+    tbody.innerHTML = html;
+    updateBasketTotals();
+  }
+
+  function updateBasketTotals() {
+    const items = Object.values(basket);
+    let total = 0, count = 0;
+    items.forEach(i => { if(i.price) total += i.price * i.qty; count++; });
+    const el = document.getElementById('basket-total');
+    if (el) el.textContent = `${count} items · SAR ${total.toFixed(2)}`;
+  }
+
+  /* ═══════════════════════════════════════════════════════
+     SEND ORDERS
+  ═══════════════════════════════════════════════════════ */
+  window.sendOrders = async () => {
+    const items = Object.values(basket);
+    if (!items.length) { toast('Basket is empty', 'err'); return; }
+
+    const btn = document.getElementById('send-btn');
+    btn.disabled = true; btn.textContent = 'Sending…';
+
+    try {
+      const now = new Date();
+      const poNumber = `PO-${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}-${String(now.getTime()).slice(-4)}`;
+
+      // Split into CWH and per-vendor orders
+      const cwhItems    = items.filter(i => !i.vendor || i.vendor === '' || i.vendor === 'CWH' || i.vendor === 'CENTRAL WAREHOUSE');
+      const vendorItems = items.filter(i => i.vendor && i.vendor !== '' && i.vendor !== 'CWH' && i.vendor !== 'CENTRAL WAREHOUSE');
+
+      const baseDoc = {
+        poNumber, status: 'pending',
+        branchId:       userProfile.branchId      || '',
+        branchName:     userProfile.branchName    || '',
+        companyId:      userProfile.companyId     || '',
+        companyName:    userProfile.companyName   || '',
+        companyLogoUrl: userProfile.companyLogoUrl|| '',
+        branchLogoUrl:  userProfile.branchLogoUrl || '',
+        createdBy:      currentUser.uid,
+        createdByEmail: currentUser.email,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
+
+      // CWH order
+      if (cwhItems.length) {
+        await addDoc(collection(db, 'purchase_orders'), {
+          ...baseDoc,
+          poNumber: poNumber + '-CWH',
+          type: 'CWH',
+          items: cwhItems.map(i => ({ ...i, receivedQty: null, received: null })),
+          total: cwhItems.reduce((s,i) => s + (i.price||0)*i.qty, 0),
+        });
+      }
+
+      // Per-vendor orders
+      const byVendor = {};
+      vendorItems.forEach(i => { if(!byVendor[i.vendor]) byVendor[i.vendor] = []; byVendor[i.vendor].push(i); });
+      for (const [vendor, vitems] of Object.entries(byVendor)) {
+        const vPO = await addDoc(collection(db, 'purchase_orders'), {
+          ...baseDoc,
+          poNumber: poNumber + '-' + vendor.replace(/\s+/g,'').toUpperCase().slice(0,6),
+          type: 'VENDOR',
+          vendor,
+          items: vitems.map(i => ({ ...i, receivedQty: null, received: null })),
+          total: vitems.reduce((s,i) => s + (i.price||0)*i.qty, 0),
+        });
+        // Generate Outlook mailto link for vendor order
+        generateVendorEmail(vendor, vitems, poNumber, vPO.id);
+      }
+
+      // Clear basket
+      basket = {}; saveBasket(); updateBasketBadge();
+      toast(`✓ Orders sent successfully!`, 'ok');
+      await loadOrders();
+      switchView('orders');
+    } catch(e) {
+      toast('Error: ' + e.message, 'err');
+    }
+    btn.disabled = false; btn.textContent = 'Send Orders';
+  };
+
+  function generateVendorEmail(vendor, items, poNumber, orderId) {
+    const subject = encodeURIComponent(`Purchase Order ${poNumber} — ${vendor}`);
+    const company = userProfile.companyName || 'NAW';
+    const branch  = userProfile.branchName  || '';
+    let body = `Dear ${vendor},\n\nPlease find below our purchase order from ${company}${branch ? ' — ' + branch : ''}:\n\nPO Number: ${poNumber}\nCompany: ${company}\nBranch: ${branch}\nDate: ${new Date().toLocaleDateString('en-GB')}\n\n`;
+    body += `ITEMS:\n${'—'.repeat(60)}\n`;
+    items.forEach((i, idx) => {
+      body += `${idx+1}. ${i.code} — ${i.item}\n   Qty: ${i.qty} ${i.unit||'EA'} @ SAR ${Number(i.price||0).toFixed(2)} = SAR ${(i.qty*(i.price||0)).toFixed(2)}\n`;
+    });
+    const total = items.reduce((s,i) => s + (i.price||0)*i.qty, 0);
+    body += `${'—'.repeat(60)}\nTOTAL: SAR ${total.toFixed(2)}\n\nPlease confirm receipt of this order.\n\nBest regards,\n${userProfile.branchName || 'NAW'}`;
+    body += `\n\nOrder ID: ${orderId}`;
+    const mailto = `mailto:?subject=${subject}&body=${encodeURIComponent(body)}`;
+    // Show email button in a toast/modal
+    showEmailModal(vendor, mailto, poNumber);
+  }
+
+  function showEmailModal(vendor, mailto, poNumber) {
+    const modal = document.getElementById('email-modal');
+    document.getElementById('email-vendor-name').textContent = vendor;
+    document.getElementById('email-po-num').textContent = poNumber;
+    document.getElementById('email-mailto-btn').href = mailto;
+    modal.style.display = 'flex';
+  }
+  window.closeEmailModal = () => { document.getElementById('email-modal').style.display = 'none'; };
+
+  /* ═══════════════════════════════════════════════════════
+     ORDERS VIEW — PENDING
+  ═══════════════════════════════════════════════════════ */
+  async function loadOrders() {
+    try {
+      const q = query(
+        collection(db, 'purchase_orders'),
+        where('branchId', '==', userProfile.branchId || ''),
+        orderBy('createdAt', 'desc')
+      );
+      const snap = await getDocs(q);
+      orders = []; snap.forEach(d => orders.push({ id: d.id, ...d.data() }));
+    } catch(e) {
+      // Fallback: load all for this user if no branchId
+      try {
+        const q2 = query(collection(db, 'purchase_orders'), where('createdBy', '==', currentUser.uid));
+        const snap2 = await getDocs(q2);
+        orders = []; snap2.forEach(d => orders.push({ id: d.id, ...d.data() }));
+      } catch(e2) { orders = []; }
+    }
+  }
+
+  function renderOrders() {
+    const container = document.getElementById('orders-list');
+    if (!orders.length) {
+      container.innerHTML = '<div class="empty-orders">No orders yet. Create a PO from the Market.</div>';
+      return;
+    }
+    const pending  = orders.filter(o => o.status === 'pending');
+    const received = orders.filter(o => o.status === 'received');
+    const finance  = orders.filter(o => o.status === 'finance');
+
+    container.innerHTML = [
+      pending.length  ? `<div class="orders-section-title">⏳ Pending Orders (${pending.length})</div>` + pending.map(renderOrderCard).join('') : '',
+      received.length ? `<div class="orders-section-title">✅ Received (${received.length})</div>` + received.map(renderOrderCard).join('') : '',
+      finance.length  ? `<div class="orders-section-title">🏦 Sent to Finance (${finance.length})</div>` + finance.map(renderOrderCard).join('') : '',
+    ].join('');
+  }
+
+  function fmtDate(ts) {
+    if (!ts) return '—';
+    const d = ts.toDate ? ts.toDate() : new Date(ts);
+    return d.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'}) + ' ' +
+           d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});
+  }
+
+  function renderOrderCard(order) {
+    const isPending  = order.status === 'pending';
+    const isReceived = order.status === 'received';
+    const statusBadge = {
+      pending:  '<span class="status-badge pending">⏳ Pending</span>',
+      received: '<span class="status-badge received">✅ Received</span>',
+      finance:  '<span class="status-badge finance">🏦 Finance</span>',
+    }[order.status] || '';
+
+    const compLogo   = userProfile?.companyLogoUrl || '';
+    const branchLogo  = userProfile?.branchLogoUrl  || '';
+    return `
+    <div class="order-card" id="oc-${order.id}">
+      <div class="oc-header">
+        <div>
+          <div class="oc-po">${order.poNumber || order.id}</div>
+          <div class="oc-meta">${fmtDate(order.createdAt)} · ${order.type === 'CWH' ? '📦 CWH' : '🏭 ' + (order.vendor||'Vendor')}</div>
+        </div>
+        <div class="oc-right">
+          ${statusBadge}
+          <div class="oc-total">SAR ${Number(order.total||0).toFixed(2)}</div>
+        </div>
+      </div>
+
+      ${isPending ? `
+      <div class="oc-items">
+        <table class="recv-table">
+          <thead><tr>
+            <th>Code</th><th>Item</th><th>Unit</th><th>Ordered</th>
+            <th>Received Qty</th><th>Status</th>
+          </tr></thead>
+          <tbody>
+            ${(order.items||[]).map((item,idx) => `
+            <tr class="recv-row ${item.received === false ? 'not-recv' : item.received === true && item.receivedQty !== item.qty ? 'adj-recv' : item.received === true ? 'full-recv' : ''}">
+              <td><span class="recv-code">${item.code}</span></td>
+              <td class="recv-name">${item.item}</td>
+              <td><span class="recv-unit">${item.unit||'EA'}</span></td>
+              <td class="recv-ordered">${item.qty}</td>
+              <td>
+                <input class="recv-qty-in" type="number" min="0" step="any"
+                  value="${item.receivedQty !== null && item.receivedQty !== undefined ? item.receivedQty : item.qty}"
+                  id="rqty-${order.id}-${idx}"
+                  ${item.received === false ? 'disabled' : ''}>
+              </td>
+              <td class="recv-btns">
+                <button class="recv-btn recv-yes ${item.received===true?'active':''}"
+                  onclick="markItem('${order.id}',${idx},'received')">✓ Received</button>
+                <button class="recv-btn recv-no  ${item.received===false?'active':''}"
+                  onclick="markItem('${order.id}',${idx},'not-received')">✕ Not Recv.</button>
+              </td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+      <div class="oc-footer">
+        <span class="oc-recv-summary" id="recv-summary-${order.id}">${getReceiveSummary(order)}</span>
+        <button class="print-btn" onclick="printOrder('${order.id}')">
+          🖨 Print PO
+        </button>
+        <button class="submit-recv-btn" onclick="submitReceived('${order.id}')">
+          Submit Received Order →
+        </button>
+      </div>` : `
+      <div class="oc-items-compact">
+        ${(order.items||[]).map(i => `
+          <div class="compact-item ${i.received===false?'not-recv':i.received===true&&i.receivedQty!==i.qty?'adj-recv':''}">
+            <span class="compact-code">${i.code}</span>
+            <span class="compact-name">${i.item}</span>
+            <span class="compact-qty">${i.receivedQty !== null && i.receivedQty !== undefined ? i.receivedQty : i.qty} ${i.unit||''}</span>
+            ${i.received===false?'<span class="compact-status nr">Not Received</span>':
+              i.received===true&&i.receivedQty!==i.qty?'<span class="compact-status adj">Adjusted</span>':
+              '<span class="compact-status ok">✓</span>'}
+          </div>`).join('')}
+      </div>`}
+    </div>`;
+  }
+
+  function getReceiveSummary(order) {
+    const items = order.items || [];
+    const done = items.filter(i => i.received !== null && i.received !== undefined).length;
+    return `${done} / ${items.length} items reviewed`;
+  }
+
+  window.markItem = async (orderId, idx, action) => {
+    const order = orders.find(o => o.id === orderId);
+    if (!order) return;
+    const item = order.items[idx];
+    const qtyInput = document.getElementById(`rqty-${orderId}-${idx}`);
+    const rQty = qtyInput ? parseFloat(qtyInput.value) || 0 : item.qty;
+
+    if (action === 'received') {
+      item.received    = true;
+      item.receivedQty = rQty;
+    } else {
+      item.received    = false;
+      item.receivedQty = 0;
+      if (qtyInput) qtyInput.disabled = true;
+    }
+
+    // Persist to Firestore
+    try {
+      await updateDoc(doc(db, 'purchase_orders', orderId), {
+        items: order.items,
+        updatedAt: serverTimestamp(),
+      });
+    } catch(e) {}
+
+    // Re-render just this card
+    const card = document.getElementById('oc-' + orderId);
+    if (card) card.outerHTML = renderOrderCard(order);
+    document.getElementById(`recv-summary-${orderId}`);
+  };
+
+  window.submitReceived = async (orderId) => {
+    const order = orders.find(o => o.id === orderId);
+    if (!order) return;
+    const unreviewedCount = (order.items||[]).filter(i => i.received === null || i.received === undefined).length;
+    if (unreviewedCount > 0) {
+      if (!confirm(`${unreviewedCount} item(s) have not been reviewed yet. Submit anyway?`)) return;
+    }
+    try {
+      await updateDoc(doc(db, 'purchase_orders', orderId), {
+        status: 'finance',
+        submittedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      order.status = 'finance';
+      toast('Order submitted to Finance ✓', 'ok');
+      renderOrders();
+    } catch(e) { toast('Error: ' + e.message, 'err'); }
+  };
+
+  /* ═══════════════════════════════════════════════════════
+     FINANCE VIEW
+  ═══════════════════════════════════════════════════════ */
+  function renderFinance() {
+    const container = document.getElementById('finance-list');
+    const financeOrders = orders.filter(o => o.status === 'finance');
+    if (!financeOrders.length) {
+      container.innerHTML = '<div class="empty-orders">No orders submitted to Finance yet.</div>';
+      document.getElementById('finance-stats').innerHTML = '';
+      return;
+    }
+
+    // KPIs
+    const totalOrders  = financeOrders.length;
+    const totalValue   = financeOrders.reduce((s,o) => s + (o.total||0), 0);
+    const receivedFull = financeOrders.filter(o => (o.items||[]).every(i => i.received !== false)).length;
+    const adjusted     = financeOrders.filter(o => (o.items||[]).some(i => i.received===true && i.receivedQty !== i.qty)).length;
+
+    document.getElementById('finance-stats').innerHTML = `
+      <div class="fin-stat"><div class="fin-lbl">Total POs</div><div class="fin-val">${totalOrders}</div></div>
+      <div class="fin-stat"><div class="fin-lbl">Total Value</div><div class="fin-val">SAR ${totalValue.toFixed(2)}</div></div>
+      <div class="fin-stat green"><div class="fin-lbl">Fully Received</div><div class="fin-val">${receivedFull}</div></div>
+      <div class="fin-stat orange"><div class="fin-lbl">Adjusted</div><div class="fin-val">${adjusted}</div></div>
+    `;
+
+    container.innerHTML = financeOrders.map(order => {
+      const items = order.items || [];
+      const receivedTotal = items.reduce((s,i) =>
+        s + (i.received === false ? 0 : (i.receivedQty ?? i.qty) * (i.price||0)), 0);
+      const orderedTotal = items.reduce((s,i) => s + i.qty * (i.price||0), 0);
+
+      return `
+      <div class="fin-order-card">
+        <div class="fin-oc-header" style="gap:12px">
+          <div class="fin-oc-logo-row">
+            ${order.companyLogoUrl  ? `<img src="${order.companyLogoUrl}"  class="fin-logo-img" onerror="this.remove()">` : ''}
+            ${order.branchLogoUrl   ? `<img src="${order.branchLogoUrl}"   class="fin-logo-img" onerror="this.remove()">` : ''}
+            <div>
+              <div class="fin-po">${order.poNumber}</div>
+              <div class="fin-meta">${fmtDate(order.submittedAt||order.createdAt)} · ${order.type==='CWH'?'📦 CWH':'🏭 '+order.vendor}</div>
+              <div class="fin-meta">${order.companyName||''} ${order.branchName ? '· '+order.branchName : ''}</div>
+            </div>
+          </div>
+          <div>
+            <div class="fin-ordered">Ordered: SAR ${orderedTotal.toFixed(2)}</div>
+            <div class="fin-received ${receivedTotal < orderedTotal ? 'diff' : ''}">Received: SAR ${receivedTotal.toFixed(2)}</div>
+            <button class="print-btn" style="margin-top:8px" onclick="printOrder('${order.id}')">🖨 Print PO</button>
+          </div>
+        </div>
+        <table class="fin-table">
+          <thead><tr><th>Code</th><th>Item</th><th>Ordered</th><th>Received</th><th>Unit Price</th><th>Value</th><th>Status</th></tr></thead>
+          <tbody>
+            ${items.map(i => {
+              const rQty = i.received === false ? 0 : (i.receivedQty ?? i.qty);
+              const isAdj = i.received === true && i.receivedQty !== i.qty;
+              const isNR  = i.received === false;
+              return `<tr class="${isNR ? 'fn-nr' : isAdj ? 'fn-adj' : ''}">
+                <td class="fn-code">${i.code}</td>
+                <td>${i.item}</td>
+                <td class="fn-num">${i.qty} ${i.unit||''}</td>
+                <td class="fn-num ${isNR?'red':isAdj?'orange':''}">${rQty} ${i.unit||''}</td>
+                <td class="fn-num">SAR ${Number(i.price||0).toFixed(2)}</td>
+                <td class="fn-num">SAR ${(rQty*(i.price||0)).toFixed(2)}</td>
+                <td>${isNR ? '<span class="fn-badge nr">Not Received</span>' : isAdj ? '<span class="fn-badge adj">Adjusted</span>' : '<span class="fn-badge ok">✓ Full</span>'}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>`;
+    }).join('');
+  }
+
+
+  /* ═══════════════════════════════════════════════════════
+     PRINT PO
+  ═══════════════════════════════════════════════════════ */
+  window.printOrder = (orderId) => {
+    const order = orders.find(o => o.id === orderId);
+    if (!order) return;
+    const items = order.items || [];
+
+    const logoHtml = [order.branchLogoUrl, order.companyLogoUrl]
+      .filter(Boolean)
+      .map(u => `<img src="${u}" style="height:50px;max-width:130px;object-fit:contain;margin-right:10px;" onerror="this.remove()">`)
+      .join('');
+
+    const rowsHtml = items.map((i, idx) => {
+      const rQty  = i.received === false ? 0 : (i.receivedQty ?? i.qty);
+      const isAdj = i.received === true && i.receivedQty !== i.qty;
+      const isNR  = i.received === false;
+      const rowStyle = isNR ? 'background:#FEF2F2' : isAdj ? 'background:#FFFBEB' : '';
+      return `<tr style="${rowStyle}">
+        <td style="padding:6px 10px;border-bottom:1px solid #E5E7EB;font-family:monospace;font-size:11px;color:#6B7280">${i.code}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #E5E7EB;font-size:12px">${i.item}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #E5E7EB;font-size:11px;color:#6B7280;text-align:center">${i.unit||'EA'}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #E5E7EB;font-family:monospace;font-size:11px;text-align:right">${i.qty}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #E5E7EB;font-family:monospace;font-size:11px;text-align:right">${i.price ? 'SAR '+Number(i.price).toFixed(2) : '—'}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #E5E7EB;font-family:monospace;font-size:11px;text-align:right">${i.price ? 'SAR '+(i.price*i.qty).toFixed(2) : '—'}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #E5E7EB;font-size:11px;text-align:center">${isNR ? '<span style="color:#DC2626;font-weight:700">Not Received</span>' : isAdj ? `<span style="color:#D97706;font-weight:700">Adjusted (${rQty})</span>` : '<span style="color:#059669">✓</span>'}</td>
+      </tr>`;
+    }).join('');
+
+    const total = items.reduce((s,i)=>s+(i.price||0)*i.qty,0);
+    const receivedTotal = items.reduce((s,i)=>s+(i.received===false?0:(i.receivedQty??i.qty)*(i.price||0)),0);
+
+    const printWin = window.open('', '_blank', 'width=900,height=700');
+    printWin.document.write(`<!DOCTYPE html><html><head>
+      <title>PO ${order.poNumber}</title>
+      <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+      <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'DM Sans', sans-serif; color: #111827; padding: 40px; font-size: 13px; }
+        @media print { body { padding: 20px; } .no-print { display: none; } }
+      </style>
+    </head><body>
+
+    <!-- Header -->
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:28px;padding-bottom:20px;border-bottom:2px solid #111827">
+      <div style="display:flex;align-items:center;gap:12px">
+        ${logoHtml || '<div style="width:50px;height:50px;border-radius:10px;background:linear-gradient(135deg,#0D7E6A,#4F46E5);display:flex;align-items:center;justify-content:center;color:#fff;font-family:monospace;font-weight:700;font-size:13px">NAW</div>'}
+        <div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:20px">${order.companyName || 'NAW'}</div>
+          ${order.branchName ? `<div style="font-size:12px;color:#6B7280;margin-top:2px">${order.branchName}</div>` : ''}
+        </div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:18px;color:#0D7E6A">PURCHASE ORDER</div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#374151;margin-top:4px">${order.poNumber}</div>
+        <div style="font-size:11px;color:#6B7280;margin-top:3px">Date: ${new Date().toLocaleDateString('en-GB',{day:'2-digit',month:'long',year:'numeric'})}</div>
+      </div>
+    </div>
+
+    <!-- Info row -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:24px;background:#F9FAFB;border-radius:10px;padding:16px">
+      <div><div style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:#9CA3AF;text-transform:uppercase;letter-spacing:.5px">Type</div><div style="font-weight:600;margin-top:3px">${order.type === 'CWH' ? '📦 Central Warehouse' : '🏭 Vendor — ' + (order.vendor||'')}</div></div>
+      <div><div style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:#9CA3AF;text-transform:uppercase;letter-spacing:.5px">Status</div><div style="font-weight:600;margin-top:3px">${{pending:'⏳ Pending',received:'✅ Received',finance:'🏦 Finance'}[order.status]||order.status}</div></div>
+      <div><div style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:#9CA3AF;text-transform:uppercase;letter-spacing:.5px">Order Total</div><div style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:16px;color:#0D7E6A;margin-top:3px">SAR ${total.toFixed(2)}</div></div>
+    </div>
+
+    <!-- Items table -->
+    <table style="width:100%;border-collapse:collapse;margin-bottom:20px">
+      <thead>
+        <tr style="background:#0D7E6A">
+          <th style="padding:9px 10px;text-align:left;font-family:'IBM Plex Mono',monospace;font-size:9px;color:#fff;text-transform:uppercase;letter-spacing:.5px">Code</th>
+          <th style="padding:9px 10px;text-align:left;font-family:'IBM Plex Mono',monospace;font-size:9px;color:#fff;text-transform:uppercase;letter-spacing:.5px">Item Description</th>
+          <th style="padding:9px 10px;text-align:center;font-family:'IBM Plex Mono',monospace;font-size:9px;color:#fff;text-transform:uppercase;letter-spacing:.5px">Unit</th>
+          <th style="padding:9px 10px;text-align:right;font-family:'IBM Plex Mono',monospace;font-size:9px;color:#fff;text-transform:uppercase;letter-spacing:.5px">Ordered</th>
+          <th style="padding:9px 10px;text-align:right;font-family:'IBM Plex Mono',monospace;font-size:9px;color:#fff;text-transform:uppercase;letter-spacing:.5px">Unit Price</th>
+          <th style="padding:9px 10px;text-align:right;font-family:'IBM Plex Mono',monospace;font-size:9px;color:#fff;text-transform:uppercase;letter-spacing:.5px">Total</th>
+          <th style="padding:9px 10px;text-align:center;font-family:'IBM Plex Mono',monospace;font-size:9px;color:#fff;text-transform:uppercase;letter-spacing:.5px">Status</th>
+        </tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+
+    <!-- Totals -->
+    <div style="display:flex;justify-content:flex-end;margin-bottom:32px">
+      <div style="width:260px">
+        <div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid #E5E7EB;font-size:12px"><span style="color:#6B7280">Ordered Total</span><span style="font-family:'IBM Plex Mono',monospace">SAR ${total.toFixed(2)}</span></div>
+        <div style="display:flex;justify-content:space-between;padding:7px 0;font-weight:700;font-size:13px"><span>Received Total</span><span style="font-family:'IBM Plex Mono',monospace;color:${receivedTotal < total ? '#D97706' : '#059669'}">SAR ${receivedTotal.toFixed(2)}</span></div>
+      </div>
+    </div>
+
+    <!-- Signatures -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px;margin-top:16px">
+      ${['Prepared By','Received By','Finance Approved'].map(label => `
+      <div>
+        <div style="font-size:10px;color:#9CA3AF;text-transform:uppercase;letter-spacing:.5px;font-family:'IBM Plex Mono',monospace;margin-bottom:28px">${label}</div>
+        <div style="border-top:1px solid #111827;padding-top:6px;font-size:10px;color:#9CA3AF">Name / Signature / Date</div>
+      </div>`).join('')}
+    </div>
+
+    <!-- Footer -->
+    <div style="margin-top:32px;padding-top:12px;border-top:1px solid #E5E7EB;display:flex;justify-content:space-between;font-size:10px;color:#9CA3AF">
+      <span style="font-family:'IBM Plex Mono',monospace">NAW — Purchase Order System</span>
+      <span>PO ID: ${order.id}</span>
+    </div>
+
+    <div class="no-print" style="margin-top:24px;text-align:center">
+      <button onclick="window.print()" style="padding:10px 28px;background:#0D7E6A;color:#fff;border:none;border-radius:8px;font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:12px;cursor:pointer">🖨 Print / Save PDF</button>
+    </div>
+
+    </body></html>`);
+    printWin.document.close();
+    setTimeout(() => printWin.focus(), 300);
+  };
+
+  /* ═══════════════════════════════════════════════════════
+     TOAST
+  ═══════════════════════════════════════════════════════ */
+  let toastTimer;
+  function toast(msg, type='ok') {
+    const el = document.getElementById('toast');
+    if (!el) return;
+    el.textContent = msg; el.className = 'toast show ' + type;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.className = 'toast', 2800);
+  }
+</script>
+
+<style>
+:root {
+  --primary:  #0D7E6A; --primary2: #0A6657;
+  --accent:   #4F46E5;
+  --danger:   #DC2626; --success: #059669; --warn: #D97706;
+  --bg:       #F5F6FA; --bg2: #fff; --bg3: #EEF0F5;
+  --border:   rgba(0,0,0,.08); --border2: rgba(0,0,0,.14);
+  --text:     #111827; --text2: #374151; --text3: #6B7280; --text4: #9CA3AF;
+  --mono:     'IBM Plex Mono', monospace;
+  --sans:     'DM Sans', system-ui, sans-serif;
+  --r:        10px;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; font-size: 13px; font-family: var(--sans); background: var(--bg); color: var(--text); }
+button { font-family: inherit; cursor: pointer; border: none; }
+input, select { font-family: inherit; }
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 2px; }
+
+/* ── SCREENS ──────────────────────────────────────────── */
+.screen { position: fixed; inset: 0; z-index: 9999; display: none; align-items: center; justify-content: center; }
+
+/* ── LOGIN ────────────────────────────────────────────── */
+#login-screen { background: linear-gradient(135deg,#0b1a17,#0e2420); display: none; }
+.login-card {
+  width: 360px; background: #fff; border-radius: 16px;
+  box-shadow: 0 24px 80px rgba(0,0,0,.35); padding: 36px 32px;
+  display: flex; flex-direction: column; gap: 18px;
+}
+.login-logo { display: flex; align-items: center; gap: 12px; }
+.login-logo-mark {
+  width: 42px; height: 42px; border-radius: 12px;
+  background: linear-gradient(135deg, var(--primary), var(--accent));
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--mono); font-weight: 700; font-size: 13px; color: #fff; letter-spacing: -1px;
+}
+.login-logo-name { font-family: var(--mono); font-weight: 700; font-size: 15px; }
+.login-logo-sub  { font-size: 10px; color: var(--text3); letter-spacing: .8px; text-transform: uppercase; margin-top: 2px; }
+.l-heading { font-family: var(--mono); font-weight: 700; font-size: 17px; }
+.l-sub     { font-size: 12px; color: var(--text3); margin-top: 2px; }
+.l-field   { display: flex; flex-direction: column; gap: 5px; }
+.l-lbl     { font-family: var(--mono); font-size: 10px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: .5px; }
+.l-input   { height: 40px; padding: 0 12px; border: 1.5px solid #E5E7EB; border-radius: 8px; font-size: 13px; background: #F9FAFB; transition: border-color .15s; }
+.l-input:focus { border-color: var(--primary); background: #fff; outline: none; }
+.l-err     { display: none; background: rgba(220,38,38,.07); border: 1px solid rgba(220,38,38,.2); border-radius: 8px; padding: 9px 12px; font-size: 11.5px; color: var(--danger); }
+.l-btn     { height: 42px; background: var(--primary); color: #fff; border-radius: 8px; font-family: var(--mono); font-weight: 700; font-size: 12px; cursor: pointer; transition: background .15s; }
+.l-btn:hover:not(:disabled) { background: var(--primary2); }
+.l-btn:disabled { opacity: .6; }
+
+/* ── NO ACCESS ────────────────────────────────────────── */
+#no-access-screen { background: linear-gradient(135deg,#0b1a17,#0e2420); display: none; flex-direction: column; }
+.na-card { width: 400px; background: #fff; border-radius: 16px; box-shadow: 0 24px 80px rgba(0,0,0,.35); padding: 36px 32px; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.na-icon { font-size: 40px; }
+.na-title { font-family: var(--mono); font-weight: 700; font-size: 16px; }
+.na-body  { font-size: 12px; color: var(--text3); line-height: 1.6; }
+.na-email { font-family: var(--mono); background: var(--bg3); padding: 2px 8px; border-radius: 5px; font-size: 12px; }
+.na-msg   { font-size: 11px; color: var(--danger); }
+.na-btn   { height: 36px; padding: 0 18px; background: #F3F4F6; border: 1px solid #E5E7EB; border-radius: 8px; font-family: var(--mono); font-size: 11px; font-weight: 600; cursor: pointer; }
+
+/* ── APP LAYOUT ───────────────────────────────────────── */
+#app-screen { display: none; flex-direction: column; position: fixed; inset: 0; z-index: 1; }
+
+/* Topbar */
+.naw-topbar {
+  background: #fff; border-bottom: 1px solid var(--border);
+  padding: 0 20px; height: 50px;
+  display: flex; align-items: center; gap: 12px; flex-shrink: 0;
+}
+.naw-logo-mark {
+  width: 30px; height: 30px; border-radius: 8px;
+  background: linear-gradient(135deg, var(--primary), var(--accent));
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--mono); font-weight: 700; font-size: 10px; color: #fff;
+}
+.naw-brand { font-family: var(--mono); font-weight: 700; font-size: 13px; }
+.naw-po-badge {
+  background: rgba(79,70,229,.1); border: 1px solid rgba(79,70,229,.25); color: var(--accent);
+  border-radius: 20px; padding: 2px 8px; font-family: var(--mono); font-size: 9px; font-weight: 700;
+}
+.naw-branch { font-size: 11px; color: var(--text3); }
+.tb-spacer { flex: 1; }
+.tb-user { font-family: var(--mono); font-size: 10px; color: var(--text3); max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tb-logout { height: 28px; padding: 0 10px; background: rgba(220,38,38,.08); color: var(--danger); border: 1px solid rgba(220,38,38,.2); border-radius: 7px; font-family: var(--mono); font-size: 10px; font-weight: 600; cursor: pointer; }
+
+/* Nav bar */
+.naw-nav {
+  background: #fff; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; padding: 0 20px; gap: 4px; flex-shrink: 0;
+}
+.nav-btn {
+  display: flex; align-items: center; gap: 6px;
+  height: 40px; padding: 0 14px; border-radius: 8px;
+  font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--text3);
+  background: none; border: none; cursor: pointer; position: relative; transition: all .15s;
+}
+.nav-btn:hover { color: var(--text2); background: var(--bg3); }
+.nav-btn.active { color: var(--primary); background: rgba(13,126,106,.08); }
+.nav-badge {
+  display: none; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; padding: 0 4px;
+  background: var(--primary); color: #fff; border-radius: 20px;
+  font-size: 9px; font-weight: 700;
+}
+
+/* Views */
+.view { flex: 1; overflow: hidden; display: none; flex-direction: column; }
+.app-body { flex: 1; overflow: auto; padding: 20px; }
+
+/* ── MARKET ───────────────────────────────────────────── */
+.market-filters {
+  display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+  background: #fff; padding: 12px 20px; border-bottom: 1px solid var(--border);
+}
+.mkt-filter-input, .mkt-filter-sel {
+  height: 34px; padding: 0 10px; border: 1px solid #E5E7EB; border-radius: 8px;
+  font-size: 12px; background: #F9FAFB; color: var(--text);
+}
+.mkt-filter-input { width: 220px; }
+.mkt-filter-input:focus, .mkt-filter-sel:focus { border-color: var(--primary); outline: none; }
+.mkt-filter-lbl { font-family: var(--mono); font-size: 9.5px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: .5px; }
+.market-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 12px; padding: 20px;
+}
+.mkt-card {
+  background: #fff; border: 1px solid var(--border); border-radius: 12px;
+  padding: 14px; display: flex; flex-direction: column; gap: 8px;
+  transition: box-shadow .15s, border-color .15s;
+}
+.mkt-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,.08); border-color: var(--border2); }
+.mkt-card.in-basket { border-color: rgba(13,126,106,.4); background: rgba(13,126,106,.02); }
+.mkt-card-top { display: flex; justify-content: space-between; align-items: center; }
+.mkt-code { font-family: var(--mono); font-size: 10px; color: var(--text3); font-weight: 600; }
+.mkt-qty-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; height: 20px; padding: 0 5px;
+  background: var(--primary); color: #fff; border-radius: 20px;
+  font-family: var(--mono); font-size: 10px; font-weight: 700;
+}
+.mkt-item-name { font-size: 12.5px; font-weight: 500; line-height: 1.35; color: var(--text); flex: 1; }
+.mkt-meta { display: flex; gap: 6px; flex-wrap: wrap; }
+.mkt-cat  { font-family: var(--mono); font-size: 9.5px; background: var(--bg3); color: var(--text3); padding: 2px 6px; border-radius: 4px; }
+.mkt-vendor { font-size: 9.5px; color: var(--text3); }
+.mkt-bottom { display: flex; justify-content: space-between; align-items: center; margin-top: 2px; }
+.mkt-price { font-family: var(--mono); font-size: 11.5px; font-weight: 600; color: var(--primary); }
+.mkt-unit  { font-size: 9px; color: var(--text4); font-weight: 400; }
+.mkt-add-btn {
+  display: flex; align-items: center; gap: 4px;
+  height: 30px; padding: 0 10px; background: var(--primary); color: #fff;
+  border-radius: 7px; font-family: var(--mono); font-size: 10px; font-weight: 700;
+  cursor: pointer; transition: background .15s;
+}
+.mkt-add-btn:hover { background: var(--primary2); }
+.empty-mkt { grid-column: 1/-1; text-align: center; padding: 60px; color: var(--text3); font-family: var(--mono); font-size: 12px; }
+
+/* ── BASKET ───────────────────────────────────────────── */
+.basket-wrap { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+.basket-table-wrap { flex: 1; overflow: auto; }
+.basket-table { width: 100%; border-collapse: collapse; }
+.basket-table th {
+  position: sticky; top: 0; background: #EEF0F5; z-index: 2;
+  text-align: left; padding: 9px 12px;
+  font-family: var(--mono); font-size: 9px; font-weight: 700; color: var(--text3);
+  text-transform: uppercase; letter-spacing: .5px; border-bottom: 1px solid var(--border2);
+}
+.basket-table td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.basket-group-hdr td {
+  background: var(--bg3); font-family: var(--mono); font-size: 10px;
+  font-weight: 700; color: var(--text2); padding: 8px 14px;
+  border-top: 2px solid var(--border2);
+}
+.basket-group-hdr.vendor-group td { background: rgba(79,70,229,.07); color: var(--accent); border-top-color: rgba(79,70,229,.2); }
+.b-code  { font-family: var(--mono); font-size: 10px; color: var(--text3); }
+.b-name  { font-size: 12.5px; font-weight: 500; }
+.b-meta  { font-size: 10px; color: var(--text3); margin-top: 2px; }
+.b-unit  { font-family: var(--mono); font-size: 10px; color: var(--text3); }
+.b-price { font-family: var(--mono); font-size: 11px; color: var(--primary); }
+.b-qty-input {
+  width: 80px; height: 30px; text-align: center; border: 1.5px solid var(--border2);
+  border-radius: 6px; font-family: var(--mono); font-size: 12px; font-weight: 600;
+  -moz-appearance: textfield;
+}
+.b-qty-input::-webkit-inner-spin-button { -webkit-appearance: none; }
+.b-qty-input:focus { border-color: var(--primary); outline: none; }
+.b-total  { font-family: var(--mono); font-size: 11.5px; font-weight: 600; color: var(--text2); }
+.b-del-btn { margin-left: 8px; width: 24px; height: 24px; border-radius: 6px; background: rgba(220,38,38,.08); color: var(--danger); border: 1px solid rgba(220,38,38,.15); font-size: 11px; cursor: pointer; }
+.basket-footer {
+  background: #fff; border-top: 1px solid var(--border2);
+  padding: 14px 20px; display: flex; align-items: center; gap: 14px;
+}
+.basket-total-lbl { font-family: var(--mono); font-size: 12px; color: var(--text2); flex: 1; }
+.send-btn {
+  height: 40px; padding: 0 24px; background: var(--primary); color: #fff;
+  border-radius: 10px; font-family: var(--mono); font-weight: 700; font-size: 12px;
+  cursor: pointer; transition: background .15s; display: flex; align-items: center; gap: 7px;
+}
+.send-btn:hover:not(:disabled) { background: var(--primary2); }
+.send-btn:disabled { opacity: .6; }
+
+/* ── ORDERS ───────────────────────────────────────────── */
+.orders-wrap { padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+.orders-section-title { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text3); text-transform: uppercase; letter-spacing: .5px; padding: 4px 0; }
+.order-card { background: #fff; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
+.oc-header { display: flex; justify-content: space-between; align-items: flex-start; padding: 16px 18px; border-bottom: 1px solid var(--border); }
+.oc-po   { font-family: var(--mono); font-weight: 700; font-size: 13px; }
+.oc-meta { font-size: 11px; color: var(--text3); margin-top: 3px; }
+.oc-right { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }
+.oc-total { font-family: var(--mono); font-weight: 700; font-size: 13px; color: var(--primary); }
+.status-badge { display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 20px; font-family: var(--mono); font-size: 9.5px; font-weight: 700; }
+.status-badge.pending  { background: rgba(217,119,6,.1);  border: 1px solid rgba(217,119,6,.25);  color: var(--warn); }
+.status-badge.received { background: rgba(5,150,105,.1);  border: 1px solid rgba(5,150,105,.25);  color: var(--success); }
+.status-badge.finance  { background: rgba(79,70,229,.1);  border: 1px solid rgba(79,70,229,.25);  color: var(--accent); }
+.oc-items { overflow-x: auto; padding: 0 18px 14px; }
+.recv-table { width: 100%; border-collapse: collapse; margin-top: 14px; }
+.recv-table th {
+  text-align: left; padding: 7px 10px; background: #EEF0F5;
+  font-family: var(--mono); font-size: 9px; font-weight: 700; color: var(--text3);
+  text-transform: uppercase; letter-spacing: .5px; border-bottom: 1px solid var(--border);
+}
+.recv-table td { padding: 9px 10px; border-bottom: 1px solid rgba(0,0,0,.04); vertical-align: middle; }
+.recv-row.full-recv  { background: rgba(5,150,105,.04); }
+.recv-row.adj-recv   { background: rgba(217,119,6,.06); }
+.recv-row.not-recv   { background: rgba(220,38,38,.04); opacity: .7; }
+.recv-code { font-family: var(--mono); font-size: 10px; color: var(--text3); }
+.recv-name { font-size: 12px; font-weight: 500; }
+.recv-unit { font-family: var(--mono); font-size: 10px; color: var(--text4); }
+.recv-ordered { font-family: var(--mono); font-size: 11px; text-align: right; }
+.recv-qty-in {
+  width: 76px; height: 28px; text-align: center; border: 1.5px solid var(--border2);
+  border-radius: 6px; font-family: var(--mono); font-size: 12px; font-weight: 600;
+  -moz-appearance: textfield;
+}
+.recv-qty-in::-webkit-inner-spin-button { -webkit-appearance: none; }
+.recv-qty-in:focus { border-color: var(--primary); outline: none; }
+.recv-qty-in:disabled { background: #F3F4F6; color: var(--text4); }
+.recv-btns { display: flex; gap: 5px; }
+.recv-btn {
+  height: 26px; padding: 0 9px; border-radius: 6px;
+  font-family: var(--mono); font-size: 9.5px; font-weight: 700; cursor: pointer;
+  transition: all .15s;
+}
+.recv-yes { background: rgba(5,150,105,.08); color: var(--success); border: 1px solid rgba(5,150,105,.2); }
+.recv-yes:hover,.recv-yes.active { background: rgba(5,150,105,.2); }
+.recv-no  { background: rgba(220,38,38,.07); color: var(--danger);  border: 1px solid rgba(220,38,38,.15); }
+.recv-no:hover,.recv-no.active  { background: rgba(220,38,38,.18); }
+.oc-footer {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 18px; border-top: 1px solid var(--border); background: var(--bg3);
+}
+.oc-recv-summary { font-family: var(--mono); font-size: 10px; color: var(--text3); }
+.submit-recv-btn {
+  height: 36px; padding: 0 18px; background: var(--accent); color: #fff;
+  border-radius: 8px; font-family: var(--mono); font-weight: 700; font-size: 11px;
+  cursor: pointer; transition: background .15s;
+}
+.submit-recv-btn:hover { background: #4338CA; }
+.oc-items-compact { padding: 12px 18px; display: flex; flex-direction: column; gap: 6px; }
+.compact-item {
+  display: flex; align-items: center; gap: 10px; padding: 7px 10px;
+  border-radius: 7px; background: var(--bg3); font-size: 11.5px;
+}
+.compact-item.not-recv { background: rgba(220,38,38,.06); }
+.compact-item.adj-recv  { background: rgba(217,119,6,.07); }
+.compact-code { font-family: var(--mono); font-size: 10px; color: var(--text3); min-width: 80px; }
+.compact-name { flex: 1; font-weight: 500; }
+.compact-qty  { font-family: var(--mono); font-size: 11px; color: var(--text2); }
+.compact-status { font-family: var(--mono); font-size: 9.5px; font-weight: 700; padding: 2px 7px; border-radius: 5px; }
+.compact-status.ok  { background: rgba(5,150,105,.1);  color: var(--success); }
+.compact-status.adj { background: rgba(217,119,6,.1);  color: var(--warn); }
+.compact-status.nr  { background: rgba(220,38,38,.08); color: var(--danger); }
+.empty-orders { text-align: center; padding: 60px 20px; color: var(--text3); font-family: var(--mono); font-size: 12px; }
+
+/* ── FINANCE ──────────────────────────────────────────── */
+.finance-header { padding: 16px 20px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.finance-title  { font-family: var(--mono); font-weight: 700; font-size: 14px; }
+.finance-sub    { font-size: 11px; color: var(--text3); margin-top: 3px; }
+.finance-stats  { display: flex; gap: 12px; margin-top: 12px; }
+.fin-stat { flex: 1; background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+.fin-stat.green { border-color: rgba(5,150,105,.3); }
+.fin-stat.orange{ border-color: rgba(217,119,6,.3); }
+.fin-lbl { font-family: var(--mono); font-size: 9px; color: var(--text3); text-transform: uppercase; letter-spacing: .5px; }
+.fin-val { font-family: var(--mono); font-size: 20px; font-weight: 700; color: var(--text); margin-top: 3px; }
+.fin-stat.green .fin-val { color: var(--success); }
+.fin-stat.orange .fin-val{ color: var(--warn); }
+.finance-list { padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+.fin-order-card { background: #fff; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
+.print-btn {
+  height: 32px; padding: 0 14px; background: rgba(13,126,106,.08);
+  border: 1px solid rgba(13,126,106,.25); color: var(--primary);
+  border-radius: 7px; font-family: var(--mono); font-size: 10px; font-weight: 700;
+  cursor: pointer; transition: all .15s;
+}
+.print-btn:hover { background: rgba(13,126,106,.18); }
+.fin-oc-header { display: flex; justify-content: space-between; align-items: flex-start; padding: 14px 16px; border-bottom: 1px solid var(--border); }
+.fin-po   { font-family: var(--mono); font-weight: 700; font-size: 12px; }
+.fin-meta { font-size: 11px; color: var(--text3); margin-top: 2px; }
+.fin-ordered  { font-family: var(--mono); font-size: 11px; color: var(--text3); text-align: right; }
+.fin-received { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--success); text-align: right; }
+.fin-received.diff { color: var(--warn); }
+.fin-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.fin-table th {
+  text-align: left; padding: 7px 12px; background: #F8F9FC;
+  font-family: var(--mono); font-size: 9px; font-weight: 700; color: var(--text3);
+  text-transform: uppercase; letter-spacing: .5px; border-bottom: 1px solid var(--border);
+}
+.fin-table td { padding: 8px 12px; border-bottom: 1px solid rgba(0,0,0,.04); vertical-align: middle; }
+.fin-table tr.fn-nr  td { background: rgba(220,38,38,.03); }
+.fin-table tr.fn-adj td { background: rgba(217,119,6,.04); }
+.fin-code { font-family: var(--mono); font-size: 10px; color: var(--text3); }
+.fn-num   { font-family: var(--mono); font-size: 11px; text-align: right; }
+.fn-num.red    { color: var(--danger); }
+.fn-num.orange { color: var(--warn); }
+.fn-badge { padding: 2px 7px; border-radius: 5px; font-family: var(--mono); font-size: 9px; font-weight: 700; }
+.fn-badge.ok  { background: rgba(5,150,105,.1);  color: var(--success); }
+.fn-badge.adj { background: rgba(217,119,6,.1);  color: var(--warn); }
+.fn-badge.nr  { background: rgba(220,38,38,.08); color: var(--danger); }
+
+/* ── EMAIL MODAL ──────────────────────────────────────── */
+#email-modal {
+  display: none; position: fixed; inset: 0; z-index: 9998;
+  background: rgba(0,0,0,.5); align-items: center; justify-content: center;
+}
+.email-card {
+  width: 460px; background: #fff; border-radius: 16px;
+  box-shadow: 0 24px 80px rgba(0,0,0,.35); padding: 32px;
+  display: flex; flex-direction: column; gap: 16px;
+}
+.email-icon { font-size: 36px; }
+.email-title { font-family: var(--mono); font-weight: 700; font-size: 15px; }
+.email-body  { font-size: 12.5px; color: var(--text3); line-height: 1.6; }
+.email-po    { font-family: var(--mono); font-weight: 700; font-size: 11px; color: var(--text2); }
+.email-btns  { display: flex; gap: 10px; }
+.email-open-btn {
+  flex: 1; height: 40px; background: var(--primary); color: #fff;
+  border-radius: 8px; font-family: var(--mono); font-weight: 700; font-size: 11px;
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  text-decoration: none; transition: background .15s;
+}
+.email-open-btn:hover { background: var(--primary2); }
+.email-close-btn {
+  height: 40px; padding: 0 16px; background: #F3F4F6; border: 1px solid #E5E7EB;
+  border-radius: 8px; font-family: var(--mono); font-size: 11px; font-weight: 600;
+  cursor: pointer;
+}
+.note-box { background: rgba(79,70,229,.07); border: 1px solid rgba(79,70,229,.2); border-radius: 8px; padding: 10px 12px; font-size: 11.5px; color: var(--accent); }
+
+
+/* ── LOGOS ────────────────────────────────────────────── */
+.tb-logos { display: flex; align-items: center; gap: 6px; }
+.tb-logo-img { height: 30px; max-width: 80px; object-fit: contain; border-radius: 5px; }
+.po-logo-row { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+.po-logo-img { height: 40px; max-width: 120px; object-fit: contain; }
+
+/* Print-specific logo styling */
+@media print {
+  .tb-logos { display: none; }
+  .po-logo-img { height: 50px; max-width: 140px; }
+}
+
+.fin-oc-logo-row { display: flex; align-items: center; gap: 10px; }
+.fin-logo-img    { height: 36px; max-width: 100px; object-fit: contain; border-radius: 5px; border: 1px solid var(--border); padding: 2px; background: #fff; }
+/* ── TOAST ────────────────────────────────────────────── */
+.toast {
+  position: fixed; bottom: 24px; right: 24px; z-index: 9999;
+  background: #1F2937; color: #fff; border-radius: 10px; padding: 11px 16px;
+  font-family: var(--mono); font-size: 11.5px; box-shadow: 0 8px 30px rgba(0,0,0,.4);
+  transform: translateY(80px); opacity: 0; transition: all .3s; max-width: 320px;
+}
+.toast.show { transform: translateY(0); opacity: 1; }
+.toast.ok  { border-left: 3px solid var(--success); }
+.toast.err { border-left: 3px solid var(--danger); }
+</style>
+</head>
+<body>
+
+<!-- ══ TOAST ════════════════════════════════════════════ -->
+<div id="toast" class="toast"></div>
+
+<!-- ══ EMAIL MODAL ══════════════════════════════════════ -->
+<div id="email-modal">
+  <div class="email-card">
+    <div class="email-icon">📧</div>
+    <div>
+      <div class="email-title">Vendor Order Ready</div>
+      <div class="email-body">
+        Your purchase order for <strong id="email-vendor-name"></strong> is ready to send.<br>
+        PO: <span class="email-po" id="email-po-num"></span>
+      </div>
+    </div>
+    <div class="note-box">
+      Clicking "Open in Outlook" will open your Outlook with the order pre-filled as an email draft. The PDF attachment can be added manually before sending.
+    </div>
+    <div class="email-btns">
+      <a class="email-open-btn" id="email-mailto-btn" href="#" target="_blank">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+        Open in Outlook
+      </a>
+      <button class="email-close-btn" onclick="closeEmailModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ LOGIN SCREEN ═════════════════════════════════════ -->
+<div id="login-screen" class="screen">
+  <div class="login-card">
+    <div class="login-logo">
+      <div class="login-logo-mark">NAW</div>
+      <div>
+        <div class="login-logo-name">NAW</div>
+        <div class="login-logo-sub">Purchase Orders</div>
+      </div>
+    </div>
+    <div>
+      <div class="l-heading">Sign In</div>
+      <div class="l-sub">Access your branch purchase orders</div>
+    </div>
+    <div class="l-field">
+      <div class="l-lbl">Email</div>
+      <input class="l-input" id="auth-email" type="email" placeholder="you@company.com" autocomplete="username">
+    </div>
+    <div class="l-field">
+      <div class="l-lbl">Password</div>
+      <input class="l-input" id="auth-pass" type="password" placeholder="••••••••" autocomplete="current-password" onkeydown="__nawPassKey(event)">
+    </div>
+    <div class="l-err" id="auth-err"></div>
+    <button class="l-btn" id="login-btn" onclick="__nawLogin()">Sign In</button>
+  </div>
+</div>
+
+<!-- ══ NO ACCESS SCREEN ═════════════════════════════════ -->
+<div id="no-access-screen" class="screen">
+  <div class="na-card">
+    <div class="na-icon">🔒</div>
+    <div class="na-title">Subscription Required</div>
+    <div class="na-body">
+      You're signed in as<br>
+      <span class="na-email" id="na-email"></span><br><br>
+      but your account doesn't have an active subscription.
+    </div>
+    <div class="na-msg" id="na-msg"></div>
+    <button class="na-btn" onclick="__nawLogout()">← Sign Out</button>
+  </div>
+</div>
+
+<!-- ══ APP ═══════════════════════════════════════════════ -->
+<div id="app-screen">
+
+  <!-- Topbar -->
+  <div class="naw-topbar">
+    <div id="topbar-logos" class="tb-logos"></div>
+    <div class="naw-logo-mark">NAW</div>
+    <div class="naw-brand">NAW</div>
+    <span class="naw-po-badge">Purchase Orders</span>
+    <span class="naw-branch" id="topbar-branch"></span>
+    <div class="tb-spacer"></div>
+    <span class="tb-user" id="topbar-user"></span>
+    <button class="tb-logout" onclick="__nawLogout()">Sign Out</button>
+  </div>
+
+  <!-- Nav -->
+  <div class="naw-nav">
+    <button class="nav-btn active" id="nav-market" onclick="switchView('market')">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+      Market
+    </button>
+    <button class="nav-btn" id="nav-basket" onclick="switchView('basket')">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2L3 6v14a2 2 0 002 2h14a2 2 0 002-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 01-8 0"/></svg>
+      Basket
+      <span class="nav-badge" id="basket-badge"></span>
+    </button>
+    <button class="nav-btn" id="nav-orders" onclick="switchView('orders')">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
+      My Orders
+    </button>
+    <button class="nav-btn" id="nav-finance" onclick="switchView('finance')">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>
+      Finance
+    </button>
+  </div>
+
+  <!-- ── MARKET VIEW ──────────────────────────────────── -->
+  <div class="view" id="view-market" style="display:flex;flex-direction:column">
+    <div class="market-filters">
+      <span class="mkt-filter-lbl">Search:</span>
+      <input class="mkt-filter-input" id="mkt-search" placeholder="Item name or code…" oninput="mktFilter()">
+      <span class="mkt-filter-lbl">Vendor:</span>
+      <select class="mkt-filter-sel" id="mkt-vendor-sel" onchange="mktFilter()">
+        <option value="">All Vendors</option>
+      </select>
+      <span class="mkt-filter-lbl">Storage:</span>
+      <select class="mkt-filter-sel" id="mkt-storage-sel" onchange="mktFilter()">
+        <option value="">All Categories</option>
+      </select>
+    </div>
+    <div style="flex:1;overflow:auto">
+      <div class="market-grid" id="market-grid">
+        <div class="empty-mkt">Loading inventory…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── BASKET VIEW ──────────────────────────────────── -->
+  <div class="view" id="view-basket" style="display:none;flex-direction:column">
+    <div class="basket-wrap">
+      <div class="basket-table-wrap">
+        <table class="basket-table">
+          <thead>
+            <tr>
+              <th>Code</th><th>Item</th><th>Unit</th><th>Price</th><th>Qty</th><th>Total</th>
+            </tr>
+          </thead>
+          <tbody id="basket-tbody">
+            <tr><td colspan="6" style="text-align:center;padding:40px;color:var(--text3);font-family:var(--mono);font-size:11px">Basket is empty.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="basket-footer" id="basket-footer" style="display:none">
+        <span class="basket-total-lbl" id="basket-total">0 items · SAR 0.00</span>
+        <button class="send-btn" id="send-btn" onclick="sendOrders()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          Send Orders
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── ORDERS VIEW ──────────────────────────────────── -->
+  <div class="view" id="view-orders" style="display:none;flex-direction:column">
+    <div style="flex:1;overflow:auto">
+      <div class="orders-wrap" id="orders-list">
+        <div class="empty-orders">Loading orders…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── FINANCE VIEW ─────────────────────────────────── -->
+  <div class="view" id="view-finance" style="display:none;flex-direction:column">
+    <div class="finance-header">
+      <div class="finance-title">Finance Dashboard</div>
+      <div class="finance-sub">Received and submitted purchase orders</div>
+      <div id="finance-stats" class="finance-stats"></div>
+    </div>
+    <div style="flex:1;overflow:auto">
+      <div class="finance-list" id="finance-list">
+        <div class="empty-orders">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /#app-screen -->
+
+</body>
+</html>

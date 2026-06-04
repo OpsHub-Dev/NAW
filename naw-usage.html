@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>NAW — Usage Entry</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script type="module">
+import { initializeApp }  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+  getFirestore, doc, getDoc, setDoc, addDoc, updateDoc,
+  collection, getDocs, serverTimestamp, query, where, orderBy
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey:"AIzaSyDO0S2QZXmoQ96Dq3o_Gri9mSrkyUW5UCM",
+  authDomain:"opshub-erp.firebaseapp.com", projectId:"opshub-erp",
+  storageBucket:"opshub-erp.firebasestorage.app",
+  messagingSenderId:"379300236732",
+  appId:"1:379300236732:web:0ca625d707b736536b2fb9"
+};
+
+const app  = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db   = getFirestore(app);
+
+/* ── State ── */
+let currentUser = null, userProfile = null;
+let allItems    = [];   // from inventory_items Firestore collection
+let usageCart   = {};   // { code: { item, qty, unit, category } }
+let activeView  = 'browse'; // browse | cart | history
+let searchTerm  = '';
+let activeCategory = '';
+let categories  = [];
+
+/* ── Helpers ── */
+const $  = id => document.getElementById(id);
+const ss = id => { document.querySelectorAll('.screen').forEach(s=>s.style.display='none'); $(id).style.display='flex'; };
+let toastT;
+function toast(m,t='ok'){const e=$('toast');e.textContent=m;e.className='toast show '+t;clearTimeout(toastT);toastT=setTimeout(()=>e.className='toast',2800);}
+function fmtDate(ts){if(!ts)return'—';const d=ts.toDate?ts.toDate():new Date(ts);return d.toLocaleDateString('en-GB',{day:'2-digit',month:'short'})+' '+d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});}
+
+/* ═══ AUTH ═══════════════════════════════════════════════ */
+onAuthStateChanged(auth, async user => {
+  if (!user) { ss('login-screen'); return; }
+  try {
+    let sub = null;
+    const s1 = await getDoc(doc(db,'subscriptions',user.uid));
+    if (s1.exists() && s1.data().active) sub = s1.data();
+    if (!sub) {
+      const safe = user.email.replace(/\./g,'_');
+      const s2 = await getDoc(doc(db,'subscriptions_by_email',safe));
+      if (s2.exists() && s2.data().active) sub = s2.data();
+    }
+    if (!sub) { showNoAccess(user); return; }
+    currentUser = user; userProfile = sub;
+    $('user-initial').textContent = user.email[0].toUpperCase();
+    $('user-branch').textContent  = sub.branchName||sub.companyName||'NAW';
+    // Load company/branch logos
+    if(sub.companyId) {
+      try {
+        const cs = await getDoc(doc(db,'companies',sub.companyId));
+        if(cs.exists() && cs.data().logoUrl) {
+          const img = $('brand-logo');
+          if(img){ img.src=cs.data().logoUrl; img.style.display='block'; }
+        }
+        if(sub.branchId) {
+          const bs = await getDoc(doc(db,'companies',sub.companyId,'branches',sub.branchId));
+          if(bs.exists() && bs.data().logoUrl) userProfile.branchLogoUrl = bs.data().logoUrl;
+        }
+      } catch(e){}
+    }
+    ss('app-screen');
+    await loadItems();
+    renderBrowse();
+  } catch(e) { showNoAccess(user, e.message); }
+});
+
+window.doLogin = async () => {
+  const email=$('l-email').value.trim(), pass=$('l-pass').value;
+  if(!email||!pass){setErr('Enter email and password.');return;}
+  setErr('');
+  const btn=$('l-btn'); btn.disabled=true; btn.textContent='Signing in…';
+  try { await signInWithEmailAndPassword(auth,email,pass); }
+  catch(e){
+    const m={'auth/wrong-password':'Wrong password.','auth/invalid-credential':'Invalid email or password.'};
+    setErr(m[e.code]||'Sign-in failed.'); btn.disabled=false; btn.textContent='Sign In';
+  }
+};
+window.doLogout = () => signOut(auth);
+window.passKey  = e => { if(e.key==='Enter') window.doLogin(); };
+function setErr(m){const e=$('l-err');e.textContent=m;e.style.display=m?'block':'none';}
+function showNoAccess(user,msg){ss('no-access-screen');$('na-email').textContent=user?.email||'';$('na-msg').textContent=msg||'';}
+
+/* ═══ LOAD ITEMS ══════════════════════════════════════════ */
+async function loadItems() {
+  try {
+    const snap = await getDocs(collection(db,'inventory_items'));
+    if(!snap.empty) {
+      allItems = []; snap.forEach(d=>allItems.push({...d.data(),id:d.id}));
+    } else {
+      allItems = window.NAW_INVENTORY || [];
+    }
+    categories = [...new Set(allItems.map(i=>i.category).filter(Boolean))].sort();
+    renderCategories();
+  } catch(e) { toast('Error loading items','err'); }
+}
+
+/* ═══ NAVIGATION ══════════════════════════════════════════ */
+window.switchView = view => {
+  activeView = view;
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  $('nav-'+view)?.classList.add('active');
+  document.querySelectorAll('.view').forEach(v=>v.style.display='none');
+  $('view-'+view).style.display='flex';
+  if(view==='browse')  renderBrowse();
+  if(view==='cart')    renderCart();
+  if(view==='history') loadHistory();
+};
+
+/* ═══ CATEGORIES ══════════════════════════════════════════ */
+function renderCategories() {
+  const container = $('cat-chips');
+  if(!container) return;
+  container.innerHTML = `<button class="cat-chip ${activeCategory===''?'active':''}" onclick="setCategory('')">All</button>`
+    + categories.map(c=>`<button class="cat-chip ${activeCategory===c?'active':''}" onclick="setCategory('${c.replace(/'/g,"\\'")}')">
+        ${getCatEmoji(c)} ${c}
+      </button>`).join('');
+}
+
+function getCatEmoji(cat) {
+  const m={'Beverages':'🥤','Dairy':'🧀','Meat':'🥩','Poultry':'🍗','Seafood':'🐟',
+    'Vegetables':'🥦','Fruits':'🍎','Bakery':'🍞','Dry Goods':'📦','Frozen':'❄️',
+    'Cleaning':'🧽','Packaging':'📦','Sauces':'🫙','Spices':'🌶','Coffee':'☕'};
+  return m[cat]||'📋';
+}
+
+window.setCategory = cat => {
+  activeCategory = cat;
+  renderCategories();
+  renderBrowse();
+};
+
+/* ═══ BROWSE ══════════════════════════════════════════════ */
+function renderBrowse() {
+  const search = ($('search-in')?.value||'').toLowerCase();
+  const filtered = allItems.filter(i=>{
+    if(activeCategory && i.category!==activeCategory) return false;
+    if(search && !i.item?.toLowerCase().includes(search) && !i.code?.toLowerCase().includes(search)) return false;
+    return true;
+  });
+
+  const grid = $('items-grid');
+  if(!filtered.length){ grid.innerHTML='<div class="empty-browse">No items found</div>'; return; }
+
+  grid.innerHTML = filtered.map(item=>{
+    const inCart = usageCart[item.code];
+    const safeId = (item.code||'').replace(/[^a-zA-Z0-9]/g,'_');
+    return `
+    <div class="item-card ${inCart?'in-cart':''}" onclick="openItemModal('${(item.code||'').replace(/'/g,"\\'")}')">
+      <div class="ic-top">
+        <span class="ic-code">${item.code||''}</span>
+        ${inCart?`<span class="ic-cart-badge">${inCart.qty}</span>`:''}
+      </div>
+      <div class="ic-name">${item.item||''}</div>
+      <div class="ic-cat">${getCatEmoji(item.category)} ${item.category||''}</div>
+      <div class="ic-bottom">
+        <span class="ic-unit">${item.unit||'EA'}</span>
+        <button class="ic-add ${inCart?'added':''}" onclick="event.stopPropagation();quickAdd('${(item.code||'').replace(/'/g,"\\'")}')"
+          id="icadd-${safeId}">
+          ${inCart?`✓ ${inCart.qty}`:'+ Add'}
+        </button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+window.searchItems = () => renderBrowse();
+
+/* ═══ ITEM MODAL ══════════════════════════════════════════ */
+window.openItemModal = code => {
+  const item = allItems.find(i=>i.code===code);
+  if(!item) return;
+  const inCart = usageCart[code];
+  $('modal-code').textContent  = item.code;
+  $('modal-name').textContent  = item.item;
+  $('modal-cat').textContent   = getCatEmoji(item.category)+' '+item.category;
+  $('modal-unit').textContent  = item.unit||'EA';
+  $('modal-qty').value         = inCart?.qty||1;
+  $('modal-qty').dataset.code  = code;
+  $('item-modal').style.display='flex';
+  setTimeout(()=>$('modal-qty').select(),100);
+};
+window.closeItemModal = () => { $('item-modal').style.display='none'; };
+
+window.confirmAddItem = () => {
+  const code = $('modal-qty').dataset.code;
+  const qty  = parseFloat($('modal-qty').value)||0;
+  const item = allItems.find(i=>i.code===code);
+  if(!item||qty<=0) return;
+  usageCart[code] = { ...item, qty };
+  updateCartBadge();
+  closeItemModal();
+  renderBrowse();
+  toast(`✓ ${item.item.slice(0,25)} — ${qty} ${item.unit||'EA'}`,'ok');
+};
+
+window.quickAdd = code => {
+  const item = allItems.find(i=>i.code===code);
+  if(!item) return;
+  if(usageCart[code]) { usageCart[code].qty += 1; }
+  else usageCart[code] = { ...item, qty: 1 };
+  updateCartBadge();
+  renderBrowse();
+};
+
+function updateCartBadge(){
+  const count = Object.keys(usageCart).length;
+  const badge = $('cart-badge');
+  if(badge){ badge.textContent=count; badge.style.display=count?'flex':'none'; }
+}
+
+/* ═══ CART ════════════════════════════════════════════════ */
+function renderCart(){
+  const items  = Object.values(usageCart);
+  const footer = $('cart-footer');
+  const list   = $('cart-list');
+  updateCartBadge();
+
+  if(!items.length){
+    list.innerHTML='<div class="empty-cart"><div class="empty-cart-icon">🛒</div><div>Cart is empty</div><div class="empty-cart-sub">Go to Browse and add items</div></div>';
+    if(footer) footer.style.display='none';
+    return;
+  }
+  if(footer) footer.style.display='flex';
+
+  const bycat = {};
+  items.forEach(i=>{ const k=i.category||'Other'; if(!bycat[k]) bycat[k]=[]; bycat[k].push(i); });
+
+  list.innerHTML = Object.entries(bycat).map(([cat,citems])=>`
+    <div class="cart-cat-hdr">${getCatEmoji(cat)} ${cat} <span class="cart-cat-count">${citems.length}</span></div>
+    ${citems.map(i=>`
+    <div class="cart-item" id="ci-${(i.code||'').replace(/[^a-zA-Z0-9]/g,'_')}">
+      <div class="ci-info">
+        <div class="ci-code">${i.code}</div>
+        <div class="ci-name">${i.item}</div>
+      </div>
+      <div class="ci-controls">
+        <button class="ci-dec" onclick="adjustCart('${(i.code||'').replace(/'/g,"\\'")}', -1)">−</button>
+        <input class="ci-qty" type="number" min="0.001" step="any" value="${i.qty}"
+          onchange="setCartQty('${(i.code||'').replace(/'/g,"\\'")}', this.value)">
+        <span class="ci-unit">${i.unit||'EA'}</span>
+        <button class="ci-inc" onclick="adjustCart('${(i.code||'').replace(/'/g,"\\'")}', 1)">+</button>
+        <button class="ci-del" onclick="removeFromCart('${(i.code||'').replace(/'/g,"\\'")}')")>✕</button>
+      </div>
+    </div>`).join('')}
+  `).join('');
+
+  $('cart-count').textContent = items.length+' item'+(items.length!==1?'s':'');
+}
+
+window.adjustCart = (code, delta) => {
+  if(!usageCart[code]) return;
+  const newQty = Math.max(0, (usageCart[code].qty||0)+delta);
+  if(newQty===0) delete usageCart[code];
+  else usageCart[code].qty = newQty;
+  updateCartBadge(); renderCart();
+};
+window.setCartQty = (code, val) => {
+  const qty = parseFloat(val)||0;
+  if(qty<=0) delete usageCart[code];
+  else if(usageCart[code]) usageCart[code].qty=qty;
+  updateCartBadge();
+};
+window.removeFromCart = code => { delete usageCart[code]; updateCartBadge(); renderCart(); };
+
+/* ═══ SUBMIT USAGE ════════════════════════════════════════ */
+window.submitUsage = async () => {
+  const items = Object.values(usageCart);
+  if(!items.length){ toast('Cart is empty','err'); return; }
+
+  const btn = $('submit-btn');
+  btn.disabled=true; btn.textContent='Submitting…';
+
+  try {
+    const now  = new Date();
+    const date = now.toISOString().split('T')[0];
+
+    // Save usage log to Firestore
+    const logDoc = {
+      branchId:       userProfile.branchId||'',
+      branchName:     userProfile.branchName||'',
+      companyId:      userProfile.companyId||'',
+      companyName:    userProfile.companyName||'',
+      submittedBy:    currentUser.uid,
+      submittedByEmail: currentUser.email,
+      date,
+      submittedAt:    serverTimestamp(),
+      items: items.map(i=>({ code:i.code, item:i.item, qty:i.qty, unit:i.unit||'EA', category:i.category||'' })),
+      totalItems: items.length,
+    };
+    await addDoc(collection(db,'usage_logs'), logDoc);
+
+    // Update branch inventory — deduct usage from inventory_items
+    // We write to branch_inventory/{branchId}/items/{code}
+    const branchId = userProfile.branchId||userProfile.companyId||currentUser.uid;
+    for(const item of items){
+      const ref = doc(db,'branch_inventory',branchId,'items',item.code);
+      const snap = await getDoc(ref);
+      if(snap.exists()){
+        const cur = snap.data().qty||0;
+        await updateDoc(ref,{ qty: Math.max(0,cur-item.qty), lastUsage:serverTimestamp(), lastUsageQty:item.qty });
+      } else {
+        // Create with negative usage tracked
+        await setDoc(ref,{ code:item.code, item:item.item, unit:item.unit||'EA',
+          category:item.category||'', qty:0, lastUsage:serverTimestamp(), lastUsageQty:item.qty });
+      }
+    }
+
+    // Clear cart
+    usageCart = {};
+    updateCartBadge();
+    toast(`✅ Usage submitted — ${items.length} items`,'ok');
+    renderCart();
+    // Switch to history to show the submission
+    setTimeout(()=>switchView('history'), 800);
+  } catch(e){ toast('Error: '+e.message,'err'); }
+  btn.disabled=false; btn.textContent='Submit Usage';
+};
+
+/* ═══ HISTORY ══════════════════════════════════════════════ */
+async function loadHistory(){
+  const list = $('history-list');
+  list.innerHTML='<div class="hist-loading">Loading…</div>';
+  try {
+    const q = query(
+      collection(db,'usage_logs'),
+      where('submittedBy','==',currentUser.uid),
+      orderBy('submittedAt','desc')
+    );
+    const snap = await getDocs(q);
+    const logs = snap.docs.map(d=>({id:d.id,...d.data()}));
+
+    if(!logs.length){ list.innerHTML='<div class="empty-hist">No usage records yet.</div>'; return; }
+
+    list.innerHTML = logs.map(log=>`
+      <div class="hist-card">
+        <div class="hc-top">
+          <div>
+            <div class="hc-date">${fmtDate(log.submittedAt)}</div>
+            <div class="hc-branch">${log.branchName||''}</div>
+          </div>
+          <div class="hc-count">${log.totalItems} items</div>
+        </div>
+        <div class="hc-items">
+          ${(log.items||[]).map(i=>`
+          <div class="hc-item">
+            <span class="hc-code">${i.code}</span>
+            <span class="hc-name">${i.item}</span>
+            <span class="hc-qty">−${i.qty} ${i.unit}</span>
+          </div>`).join('')}
+        </div>
+      </div>`).join('');
+  } catch(e){
+    // Fallback without orderBy if index not built
+    try {
+      const snap2 = await getDocs(query(collection(db,'usage_logs'),where('submittedBy','==',currentUser.uid)));
+      const logs2 = snap2.docs.map(d=>({id:d.id,...d.data()}));
+      logs2.sort((a,b)=>(b.submittedAt?.seconds||0)-(a.submittedAt?.seconds||0));
+      if(!logs2.length){ list.innerHTML='<div class="empty-hist">No usage records yet.</div>'; return; }
+      list.innerHTML = logs2.slice(0,20).map(log=>`
+        <div class="hist-card">
+          <div class="hc-top"><div><div class="hc-date">${fmtDate(log.submittedAt)}</div><div class="hc-branch">${log.branchName||''}</div></div><div class="hc-count">${log.totalItems} items</div></div>
+          <div class="hc-items">${(log.items||[]).map(i=>`<div class="hc-item"><span class="hc-code">${i.code}</span><span class="hc-name">${i.item}</span><span class="hc-qty">−${i.qty} ${i.unit}</span></div>`).join('')}</div>
+        </div>`).join('');
+    } catch(e2){ list.innerHTML=`<div class="empty-hist">Error loading history.</div>`; }
+  }
+}
+</script>
+
+<style>
+:root{
+  --primary:#0D7E6A; --primary2:#0A6657; --accent:#4F46E5;
+  --danger:#DC2626; --success:#059669; --warn:#D97706;
+  --bg:#F5F6FA; --bg2:#fff; --bg3:#EEF0F5;
+  --border:rgba(0,0,0,.08); --border2:rgba(0,0,0,.14);
+  --text:#111827; --text2:#374151; --text3:#6B7280; --text4:#9CA3AF;
+  --mono:'IBM Plex Mono',monospace; --sans:'DM Sans',system-ui,sans-serif;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+html{height:100%;-webkit-tap-highlight-color:transparent;}
+body{height:100%;font-size:14px;font-family:var(--sans);background:var(--bg);color:var(--text);overscroll-behavior:none;}
+button{font-family:inherit;cursor:pointer;border:none;-webkit-tap-highlight-color:transparent;}
+input,select{font-family:inherit;outline:none;}
+input[type=number]{-moz-appearance:textfield;}
+input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;}
+
+.screen{display:none;position:fixed;inset:0;z-index:9999;align-items:center;justify-content:center;}
+
+/* LOGIN */
+#login-screen{background:linear-gradient(160deg,#0b1a17 0%,#0e2420 100%);}
+.login-card{width:320px;background:#fff;border-radius:20px;box-shadow:0 28px 80px rgba(0,0,0,.4);padding:32px 28px;display:flex;flex-direction:column;gap:16px;}
+.lc-logo{display:flex;align-items:center;gap:10px;}
+.lc-mark{width:40px;height:40px;border-radius:11px;background:linear-gradient(135deg,var(--primary),var(--accent));display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-weight:700;font-size:11px;color:#fff;}
+.lc-name{font-family:var(--mono);font-weight:700;font-size:14px;}
+.lc-sub{font-size:10px;color:var(--text3);letter-spacing:.8px;text-transform:uppercase;margin-top:1px;}
+.usage-badge{display:inline-flex;gap:5px;align-items:center;background:rgba(13,126,106,.1);border:1px solid rgba(13,126,106,.25);color:var(--primary);border-radius:20px;padding:3px 10px;font-family:var(--mono);font-size:9.5px;font-weight:700;width:fit-content;}
+.lc-heading{font-family:var(--mono);font-weight:700;font-size:16px;}
+.lc-field{display:flex;flex-direction:column;gap:4px;}
+.lc-lbl{font-family:var(--mono);font-size:9.5px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;}
+.lc-input{height:44px;padding:0 12px;border:1.5px solid #E5E7EB;border-radius:10px;font-size:14px;background:#F9FAFB;}
+.lc-input:focus{border-color:var(--primary);}
+.lc-err{display:none;background:rgba(220,38,38,.07);border:1px solid rgba(220,38,38,.2);border-radius:8px;padding:9px 12px;font-size:11.5px;color:var(--danger);}
+.lc-btn{height:46px;background:var(--primary);color:#fff;border-radius:10px;font-family:var(--mono);font-weight:700;font-size:12px;transition:background .15s;}
+.lc-btn:active{background:var(--primary2);}
+
+/* NO ACCESS */
+#no-access-screen{background:linear-gradient(160deg,#0b1a17,#0e2420);flex-direction:column;}
+.na-card{width:320px;background:#fff;border-radius:18px;box-shadow:0 24px 80px rgba(0,0,0,.4);padding:32px 28px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:12px;}
+.na-icon{font-size:36px;}.na-title{font-family:var(--mono);font-weight:700;font-size:15px;}
+.na-body{font-size:12px;color:var(--text3);line-height:1.6;}
+.na-email{font-family:var(--mono);background:var(--bg3);padding:2px 7px;border-radius:5px;font-size:11px;}
+.na-msg{font-size:11px;color:var(--danger);}
+.na-btn{height:38px;padding:0 18px;background:#F3F4F6;border:1px solid #E5E7EB;border-radius:8px;font-family:var(--mono);font-size:11px;font-weight:600;cursor:pointer;}
+
+/* APP SHELL */
+#app-screen{display:none;flex-direction:column;position:fixed;inset:0;z-index:1;background:var(--bg);}
+
+/* Header */
+.app-header{background:#fff;border-bottom:1px solid var(--border);padding:10px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0;}
+.brand-logo{height:28px;max-width:70px;object-fit:contain;display:none;border-radius:4px;}
+.h-mark{width:28px;height:28px;border-radius:7px;background:linear-gradient(135deg,var(--primary),var(--accent));display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-weight:700;font-size:9px;color:#fff;}
+.h-brand{font-family:var(--mono);font-weight:700;font-size:12px;}
+.h-badge{background:rgba(13,126,106,.1);border:1px solid rgba(13,126,106,.2);color:var(--primary);border-radius:20px;padding:2px 7px;font-family:var(--mono);font-size:8.5px;font-weight:700;}
+.h-spacer{flex:1;}
+.h-branch{font-size:11px;color:var(--text3);font-family:var(--mono);max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.h-avatar{width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,var(--primary),var(--accent));color:#fff;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-weight:700;font-size:11px;cursor:pointer;}
+
+/* Views */
+.view{flex:1;overflow:hidden;display:none;flex-direction:column;}
+
+/* BROWSE */
+.browse-top{background:#fff;padding:10px 14px;border-bottom:1px solid var(--border);flex-shrink:0;}
+.search-bar{display:flex;align-items:center;gap:8px;background:var(--bg3);border-radius:10px;padding:0 12px;height:40px;border:1px solid var(--border);}
+.search-bar input{flex:1;background:none;border:none;font-size:14px;color:var(--text);}
+.search-bar input::placeholder{color:var(--text4);}
+.search-icon{font-size:15px;color:var(--text4);}
+.cat-strip{overflow-x:auto;-webkit-overflow-scrolling:touch;white-space:nowrap;padding:10px 14px 0;display:flex;gap:7px;flex-shrink:0;}
+.cat-strip::-webkit-scrollbar{display:none;}
+.cat-chip{display:inline-flex;align-items:center;gap:4px;height:30px;padding:0 12px;border-radius:20px;font-size:12px;font-family:var(--mono);font-weight:600;background:#fff;border:1.5px solid var(--border2);color:var(--text3);white-space:nowrap;cursor:pointer;transition:all .15s;}
+.cat-chip.active{background:var(--primary);border-color:var(--primary);color:#fff;}
+.items-grid{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:12px 14px;display:grid;grid-template-columns:repeat(2,1fr);gap:10px;}
+.item-card{background:#fff;border:1.5px solid var(--border);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:6px;cursor:pointer;transition:all .15s;-webkit-tap-highlight-color:transparent;}
+.item-card:active{transform:scale(.97);}
+.item-card.in-cart{border-color:rgba(13,126,106,.4);background:rgba(13,126,106,.02);}
+.ic-top{display:flex;justify-content:space-between;align-items:center;}
+.ic-code{font-family:var(--mono);font-size:9px;color:var(--text4);}
+.ic-cart-badge{min-width:18px;height:18px;padding:0 4px;background:var(--primary);color:#fff;border-radius:20px;font-family:var(--mono);font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;}
+.ic-name{font-size:12.5px;font-weight:500;line-height:1.3;color:var(--text);flex:1;}
+.ic-cat{font-size:10.5px;color:var(--text3);}
+.ic-bottom{display:flex;justify-content:space-between;align-items:center;margin-top:2px;}
+.ic-unit{font-family:var(--mono);font-size:9.5px;color:var(--text4);}
+.ic-add{height:28px;padding:0 10px;background:var(--primary);color:#fff;border-radius:7px;font-family:var(--mono);font-weight:700;font-size:10px;cursor:pointer;transition:background .15s;}
+.ic-add.added{background:rgba(13,126,106,.15);color:var(--primary);}
+.ic-add:active{background:var(--primary2);}
+.empty-browse{grid-column:1/-1;text-align:center;padding:40px 20px;color:var(--text3);font-family:var(--mono);font-size:12px;}
+
+/* ITEM MODAL */
+.modal-overlay{display:none;position:fixed;inset:0;z-index:8000;background:rgba(0,0,0,.5);align-items:flex-end;justify-content:center;}
+.item-modal-card{background:#fff;border-radius:20px 20px 0 0;padding:20px 20px calc(20px + var(--safe-bottom));width:100%;max-width:480px;display:flex;flex-direction:column;gap:14px;}
+.im-handle{width:36px;height:4px;background:#E5E7EB;border-radius:2px;margin:0 auto -6px;}
+.im-code{font-family:var(--mono);font-size:10px;color:var(--text3);}
+.im-name{font-size:17px;font-weight:600;line-height:1.3;}
+.im-meta{font-size:12px;color:var(--text3);}
+.im-qty-row{display:flex;align-items:center;gap:12px;}
+.im-qty-lbl{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;}
+.im-qty-wrap{display:flex;align-items:center;gap:10px;flex:1;}
+.im-dec,.im-inc{width:40px;height:40px;border-radius:10px;background:var(--bg3);font-size:20px;font-weight:700;display:flex;align-items:center;justify-content:center;cursor:pointer;}
+.im-dec:active,.im-inc:active{background:var(--bg4);}
+.im-qty-in{flex:1;height:48px;text-align:center;border:2px solid var(--border2);border-radius:10px;font-family:var(--mono);font-size:22px;font-weight:700;-moz-appearance:textfield;}
+.im-qty-in:focus{border-color:var(--primary);}
+.im-unit{font-family:var(--mono);font-size:12px;color:var(--text3);}
+.im-confirm{height:50px;background:var(--primary);color:#fff;border-radius:12px;font-family:var(--mono);font-weight:700;font-size:13px;width:100%;cursor:pointer;transition:background .15s;}
+.im-confirm:active{background:var(--primary2);}
+.im-cancel{height:40px;background:var(--bg3);color:var(--text3);border-radius:10px;font-family:var(--mono);font-size:12px;font-weight:600;width:100%;cursor:pointer;}
+
+/* CART */
+.cart-header{background:#fff;border-bottom:1px solid var(--border);padding:12px 16px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;}
+.cart-title{font-family:var(--mono);font-weight:700;font-size:14px;}
+.cart-count{font-family:var(--mono);font-size:11px;color:var(--text3);}
+.cart-list{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:10px 14px;display:flex;flex-direction:column;gap:4px;}
+.cart-cat-hdr{font-family:var(--mono);font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;padding:10px 4px 4px;display:flex;align-items:center;gap:8px;}
+.cart-cat-count{background:var(--bg3);padding:1px 6px;border-radius:4px;font-size:9px;}
+.cart-item{background:#fff;border:1px solid var(--border);border-radius:10px;padding:10px 12px;display:flex;align-items:center;gap:10px;}
+.ci-info{flex:1;min-width:0;}
+.ci-code{font-family:var(--mono);font-size:9px;color:var(--text4);}
+.ci-name{font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.ci-controls{display:flex;align-items:center;gap:5px;flex-shrink:0;}
+.ci-dec,.ci-inc{width:28px;height:28px;border-radius:7px;background:var(--bg3);font-size:15px;font-weight:700;display:flex;align-items:center;justify-content:center;cursor:pointer;}
+.ci-dec:active,.ci-inc:active{background:var(--bg4);}
+.ci-qty{width:50px;height:32px;text-align:center;border:1.5px solid var(--border2);border-radius:7px;font-family:var(--mono);font-size:13px;font-weight:600;}
+.ci-qty:focus{border-color:var(--primary);}
+.ci-unit{font-family:var(--mono);font-size:9px;color:var(--text4);min-width:20px;}
+.ci-del{width:26px;height:26px;border-radius:6px;background:rgba(220,38,38,.08);color:var(--danger);font-size:11px;display:flex;align-items:center;justify-content:center;cursor:pointer;}
+.cart-footer{background:#fff;border-top:1px solid var(--border);padding:12px 14px calc(12px + var(--safe-bottom));flex-shrink:0;display:none;}
+.submit-btn{width:100%;height:52px;background:var(--primary);color:#fff;border-radius:14px;font-family:var(--mono);font-weight:700;font-size:14px;cursor:pointer;transition:background .15s;}
+.submit-btn:active{background:var(--primary2);}
+.submit-btn:disabled{opacity:.6;}
+.empty-cart{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:var(--text3);font-family:var(--mono);font-size:12px;}
+.empty-cart-icon{font-size:48px;}
+.empty-cart-sub{font-size:11px;color:var(--text4);}
+
+/* HISTORY */
+.hist-header{background:#fff;border-bottom:1px solid var(--border);padding:12px 16px;flex-shrink:0;}
+.hist-title{font-family:var(--mono);font-weight:700;font-size:14px;}
+.hist-sub{font-size:11px;color:var(--text3);margin-top:2px;}
+.history-list{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:12px 14px;display:flex;flex-direction:column;gap:10px;}
+.hist-card{background:#fff;border:1px solid var(--border);border-radius:12px;overflow:hidden;}
+.hc-top{display:flex;justify-content:space-between;align-items:flex-start;padding:12px 14px;border-bottom:1px solid var(--border);}
+.hc-date{font-family:var(--mono);font-weight:700;font-size:11px;}
+.hc-branch{font-size:11px;color:var(--text3);margin-top:2px;}
+.hc-count{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--primary);}
+.hc-items{padding:8px 14px;display:flex;flex-direction:column;gap:5px;}
+.hc-item{display:flex;align-items:center;gap:8px;font-size:12px;}
+.hc-code{font-family:var(--mono);font-size:9.5px;color:var(--text4);min-width:64px;}
+.hc-name{flex:1;color:var(--text2);}
+.hc-qty{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--danger);}
+.hist-loading,.empty-hist{text-align:center;padding:40px;color:var(--text3);font-family:var(--mono);font-size:12px;}
+
+/* BOTTOM NAV */
+.bottom-nav{background:#fff;border-top:1px solid var(--border);display:flex;padding:6px 0 calc(6px + var(--safe-bottom));flex-shrink:0;}
+.nav-item{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:6px 0;cursor:pointer;-webkit-tap-highlight-color:transparent;position:relative;border:none;background:none;}
+.nav-icon{font-size:20px;transition:transform .15s;}
+.nav-label{font-family:var(--mono);font-size:9px;font-weight:600;color:var(--text3);}
+.nav-item.active .nav-label{color:var(--primary);}
+.nav-item.active .nav-icon{transform:scale(1.1);}
+.cart-badge{position:absolute;top:3px;right:calc(50% - 18px);min-width:18px;height:18px;padding:0 4px;background:var(--danger);color:#fff;border-radius:20px;font-family:var(--mono);font-size:9px;font-weight:700;display:none;align-items:center;justify-content:center;}
+
+/* Toast */
+.toast{position:fixed;bottom:90px;left:50%;transform:translateX(-50%) translateY(20px);z-index:9999;background:#1F2937;color:#fff;border-radius:10px;padding:10px 16px;font-family:var(--mono);font-size:11.5px;box-shadow:0 8px 30px rgba(0,0,0,.4);opacity:0;transition:all .3s;max-width:300px;text-align:center;white-space:nowrap;}
+.toast.show{transform:translateX(-50%) translateY(0);opacity:1;}
+.toast.ok{border-left:3px solid var(--success);}.toast.err{border-left:3px solid var(--danger);}
+</style>
+</head>
+<body>
+
+<div id="toast" class="toast"></div>
+
+<!-- ITEM MODAL -->
+<div id="item-modal" class="modal-overlay" onclick="if(event.target===this)closeItemModal()">
+  <div class="item-modal-card">
+    <div class="im-handle"></div>
+    <div>
+      <div class="im-code" id="modal-code"></div>
+      <div class="im-name" id="modal-name"></div>
+      <div class="im-meta" id="modal-cat"></div>
+    </div>
+    <div class="im-qty-row">
+      <div class="im-qty-lbl">Qty Used</div>
+      <div class="im-qty-wrap">
+        <button class="im-dec" onclick="const q=$('modal-qty');q.value=Math.max(0.5,parseFloat(q.value||1)-1)">−</button>
+        <input class="im-qty-in" id="modal-qty" type="number" min="0.001" step="any" value="1">
+        <span class="im-unit" id="modal-unit"></span>
+        <button class="im-inc" onclick="const q=$('modal-qty');q.value=parseFloat(q.value||0)+1">+</button>
+      </div>
+    </div>
+    <button class="im-confirm" onclick="confirmAddItem()">✓ Add to Usage</button>
+    <button class="im-cancel" onclick="closeItemModal()">Cancel</button>
+  </div>
+</div>
+
+<!-- LOGIN -->
+<div id="login-screen" class="screen">
+  <div class="login-card">
+    <div class="lc-logo"><div class="lc-mark">NAW</div><div><div class="lc-name">NAW</div><div class="lc-sub">Usage Entry</div></div></div>
+    <div class="usage-badge">📊 Staff Usage Entry</div>
+    <div class="lc-heading">Sign In</div>
+    <div class="lc-field"><div class="lc-lbl">Email</div><input class="lc-input" id="l-email" type="email" placeholder="staff@company.com" autocomplete="username"></div>
+    <div class="lc-field"><div class="lc-lbl">Password</div><input class="lc-input" id="l-pass" type="password" placeholder="••••••••" onkeydown="passKey(event)" autocomplete="current-password"></div>
+    <div class="lc-err" id="l-err"></div>
+    <button class="lc-btn" id="l-btn" onclick="doLogin()">Sign In</button>
+  </div>
+</div>
+
+<!-- NO ACCESS -->
+<div id="no-access-screen" class="screen">
+  <div class="na-card">
+    <div class="na-icon">🔒</div><div class="na-title">Access Required</div>
+    <div class="na-body">Signed in as<br><span class="na-email" id="na-email"></span><br><br>No active subscription found.</div>
+    <div class="na-msg" id="na-msg"></div>
+    <button class="na-btn" onclick="doLogout()">← Sign Out</button>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="app-screen">
+  <!-- Header -->
+  <div class="app-header">
+    <img id="brand-logo" class="brand-logo" alt="logo">
+    <div class="h-mark">NAW</div>
+    <div class="h-brand">NAW</div>
+    <span class="h-badge">Usage</span>
+    <div class="h-spacer"></div>
+    <span class="h-branch" id="user-branch"></span>
+    <div class="h-avatar" id="user-initial" onclick="doLogout()">U</div>
+  </div>
+
+  <!-- BROWSE VIEW -->
+  <div class="view" id="view-browse" style="display:flex;flex-direction:column">
+    <div class="browse-top">
+      <div class="search-bar">
+        <span class="search-icon">🔍</span>
+        <input id="search-in" type="search" placeholder="Search items…" oninput="searchItems()" autocomplete="off" autocorrect="off" spellcheck="false">
+      </div>
+    </div>
+    <div class="cat-strip" id="cat-chips"></div>
+    <div class="items-grid" id="items-grid">
+      <div class="empty-browse">Loading items…</div>
+    </div>
+  </div>
+
+  <!-- CART VIEW -->
+  <div class="view" id="view-cart" style="display:none;flex-direction:column">
+    <div class="cart-header">
+      <div class="cart-title">Usage Cart</div>
+      <div class="cart-count" id="cart-count">0 items</div>
+    </div>
+    <div class="cart-list" id="cart-list"></div>
+    <div class="cart-footer" id="cart-footer">
+      <button class="submit-btn" id="submit-btn" onclick="submitUsage()">Submit Usage</button>
+    </div>
+  </div>
+
+  <!-- HISTORY VIEW -->
+  <div class="view" id="view-history" style="display:none;flex-direction:column">
+    <div class="hist-header">
+      <div class="hist-title">My Usage History</div>
+      <div class="hist-sub">Your submitted usage logs</div>
+    </div>
+    <div class="history-list" id="history-list"></div>
+  </div>
+
+  <!-- Bottom Nav -->
+  <div class="bottom-nav">
+    <button class="nav-item active" id="nav-browse" onclick="switchView('browse')">
+      <div class="nav-icon">🔍</div>
+      <div class="nav-label">Browse</div>
+    </button>
+    <button class="nav-item" id="nav-cart" onclick="switchView('cart')">
+      <div class="nav-icon">🛒</div>
+      <div class="nav-label">Cart</div>
+      <div class="cart-badge" id="cart-badge">0</div>
+    </button>
+    <button class="nav-item" id="nav-history" onclick="switchView('history')">
+      <div class="nav-icon">📋</div>
+      <div class="nav-label">History</div>
+    </button>
+  </div>
+</div>
+
+</body>
+</html>
