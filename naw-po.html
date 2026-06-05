@@ -9,7 +9,7 @@
 <!-- ══ FIREBASE ══════════════════════════════════════════ -->
 <script type="module">
   import { initializeApp }   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-  import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged }
+  import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged, updatePassword, sendPasswordResetEmail }
     from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
   import {
     getFirestore, doc, getDoc, setDoc, updateDoc, addDoc,
@@ -800,6 +800,22 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => el.className = 'toast', 2800);
   }
+  window.doForgotPassword = async () => {
+    const email = document.getElementById('auth-email')?.value.trim() || document.getElementById('l-email')?.value.trim() || '';
+    if(!email){setAuthErr('Enter your email address first.');return;}
+    try {
+      await sendPasswordResetEmail(auth, email);
+      setAuthErr('');
+      const info = document.createElement('div');
+      info.style.cssText='background:rgba(5,150,105,.07);border:1px solid rgba(5,150,105,.25);border-radius:8px;padding:9px 12px;font-size:11.5px;color:#059669;';
+      info.textContent='✓ Password reset email sent. Check your inbox.';
+      const btn = document.getElementById('auth-login-btn')||document.getElementById('l-btn');
+      btn.parentNode.insertBefore(info, btn);
+      setTimeout(()=>info.remove(), 5000);
+    } catch(e){ setAuthErr('Could not send reset email.'); }
+  };
+  window.spPassKey = e => { if(e.key==='Enter') window.doSetPassword(); };
+
 </script>
 
 <style>
@@ -1205,6 +1221,39 @@ input, select { font-family: inherit; }
   </div>
 </div>
 
+
+<!-- SET PASSWORD SCREEN -->
+<div id="set-password-screen" style="display:none;position:fixed;inset:0;z-index:9999;background:linear-gradient(135deg,#0b1a17,#0e2420);align-items:center;justify-content:center;">
+  <div style="width:360px;background:#fff;border-radius:16px;box-shadow:0 24px 80px rgba(0,0,0,.35);padding:36px 32px;display:flex;flex-direction:column;gap:18px;">
+    <div style="display:flex;align-items:center;gap:12px;">
+      <div style="width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,#0D7E6A,#4F46E5);display:flex;align-items:center;justify-content:center;font-family:monospace;font-weight:700;font-size:12px;color:#fff;">NAW</div>
+      <div><div style="font-family:monospace;font-weight:700;font-size:15px;">NAW</div><div style="font-size:10px;color:#6B7280;letter-spacing:.8px;text-transform:uppercase;margin-top:2px;">Purchase Orders</div></div>
+    </div>
+    <div style="background:rgba(13,126,106,.08);border:1px solid rgba(13,126,106,.25);border-radius:10px;padding:12px 14px;">
+      <div style="font-family:monospace;font-weight:700;font-size:11px;color:#0D7E6A;">👋 Welcome! First time setup</div>
+      <div style="font-size:12px;color:#374151;margin-top:4px;line-height:1.5;">Please set your own password to continue. You won't need to do this again.</div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:5px;">
+      <div style="font-family:monospace;font-size:10px;font-weight:600;color:#374151;text-transform:uppercase;letter-spacing:.5px;">New Password</div>
+      <input id="sp-pass1" type="password" placeholder="Min. 6 characters" autocomplete="new-password"
+        style="height:40px;padding:0 12px;border:1.5px solid #E5E7EB;border-radius:8px;font-size:13px;background:#F9FAFB;font-family:inherit;outline:none;"
+        onfocus="this.style.borderColor='#0D7E6A'" onblur="this.style.borderColor='#E5E7EB'">
+    </div>
+    <div style="display:flex;flex-direction:column;gap:5px;">
+      <div style="font-family:monospace;font-size:10px;font-weight:600;color:#374151;text-transform:uppercase;letter-spacing:.5px;">Confirm Password</div>
+      <input id="sp-pass2" type="password" placeholder="Repeat password" autocomplete="new-password"
+        style="height:40px;padding:0 12px;border:1.5px solid #E5E7EB;border-radius:8px;font-size:13px;background:#F9FAFB;font-family:inherit;outline:none;"
+        onfocus="this.style.borderColor='#0D7E6A'" onblur="this.style.borderColor='#E5E7EB'"
+        onkeydown="spPassKey(event)">
+    </div>
+    <div id="sp-err" style="display:none;background:rgba(220,38,38,.07);border:1px solid rgba(220,38,38,.2);border-radius:8px;padding:9px 12px;font-size:11.5px;color:#DC2626;"></div>
+    <button id="sp-btn" onclick="doSetPassword()"
+      style="height:42px;background:#0D7E6A;color:#fff;border:none;border-radius:8px;font-family:monospace;font-weight:700;font-size:12px;cursor:pointer;transition:background .15s;">
+      Set Password & Continue →
+    </button>
+  </div>
+</div>
+
 <!-- ══ LOGIN SCREEN ═════════════════════════════════════ -->
 <div id="login-screen" class="screen">
   <div class="login-card">
@@ -1229,6 +1278,11 @@ input, select { font-family: inherit; }
     </div>
     <div class="l-err" id="auth-err"></div>
     <button class="l-btn" id="login-btn" onclick="__nawLogin()">Sign In</button>
+    <div style="text-align:center;margin-top:-6px;">
+      <button onclick="doForgotPassword()" style="background:none;border:none;font-family:monospace;font-size:10.5px;color:#6B7280;cursor:pointer;text-decoration:underline;padding:0;">
+        Forgot password?
+      </button>
+    </div>
   </div>
 </div>
 
